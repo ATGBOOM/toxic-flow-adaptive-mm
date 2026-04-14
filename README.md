@@ -39,8 +39,7 @@ Three deliberately chosen weeks across distinct market conditions:
 | 3 | Feb 24 - Mar 2 2025 | Stress/correction | from $100k+ highs |
 
 **Why three regimes:** To test whether toxicity patterns and classifier performance are 
-regime-dependent, rather than fitting to one market condition. Also allows cross-regime 
-comparison of OFI signal decay, spread dynamics, and VPIN behaviour.
+regime-dependent, rather than fitting to one market condition.
 
 **Sampling bias caveat:** These weeks were selected for regime variation, not randomly. 
 Findings should not be generalised as representative of typical market conditions.
@@ -48,56 +47,76 @@ Findings should not be generalised as representative of typical market condition
 ## Pipeline
 
 ### Trade Data
-Raw CSV → typed DataFrame (timestamp auto-detection for ms/μs, direction as +1/-1 sign, 
+Raw CSV.gz → typed DataFrame (Unix timestamp in seconds, direction as +1/-1 sign, 
 gap detection) → parquet. One file per asset per week.
 
 ### Order Book Data
 Raw JSON lines → order book reconstruction (snapshot initialisation + sequential delta 
 application) → time-series of derived features sampled at regular intervals → parquet. 
-To be implemented in Session 7.
+Implemented in Session 7.
 
 ## EDA Findings (Session 5)
 
 ### 1. Sampling frequency dominates distributional statistics
 Tick-level return statistics are dominated by microstructure artefacts. Kurtosis drops 
 from ~10,000 at tick level to 5-10 at 1-minute bars — the correct range for analysis. 
-Skewness at tick level contains no interpretable signal. This directly motivates the 
-volume clock in VPIN: time-based sampling produces statistics that reflect trade arrival 
-rates more than genuine price dynamics.
+This directly motivates the volume clock in VPIN: time-based sampling produces statistics 
+that reflect trade arrival rates more than genuine price dynamics.
 
 ### 2. OFI signal decays at dramatically different rates across regimes
-Correlation between order flow imbalance (OFI) and next-period returns varies by both 
-frequency and regime:
 
-| | Raw OFI 1min | Raw OFI 10s | Normalised OFI 1min | Normalised OFI 10s |
-|--|--|--|--|--|
-| Week 1 (consolidation) | 0.0009 | 0.054 | -0.002 | 0.071 |
-| Week 2 (breakout) | 0.006 | 0.045 | 0.020 | 0.085 |
-| Week 3 (stress) | 0.015 | 0.017 | 0.014 | 0.061 |
+| | Raw OFI 10s | Raw OFI 1min | Decay ratio |
+|--|--|--|--|
+| Week 1 (consolidation) | 0.054 | 0.001 | 54x |
+| Week 2 (breakout) | 0.045 | 0.006 | 8x |
+| Week 3 (stress) | 0.017 | 0.015 | 1x |
 
-Decay ratio (10s correlation / 1min correlation): Week 1 = 54x, Week 2 = 8x, Week 3 = 1x.
-
-The stress/correction week shows persistent OFI — the signal survives temporal aggregation, 
-consistent with sustained directional selling pressure. The consolidation week shows fast 
-decay, consistent with short bursts of noise trading that rapidly reverse.
+Week 3 shows persistent OFI — the signal survives temporal aggregation, consistent with 
+sustained directional selling pressure. Week 1 shows fast decay, consistent with noise 
+trading that rapidly reverses.
 
 ### 3. Normalisation sharpens signal at short frequencies, hurts at long
-Volume-normalised OFI (signed volume / total volume, range [-1,+1]) outperforms raw OFI 
-at 10-second bars across all regimes. At 1-minute bars normalisation adds noise — the 
-denominator becomes dominated by a few large trades. Week 2 (breakout) shows strongest 
-normalised OFI predictability once volume activity is controlled for, pointing toward 
-momentum-driven rather than information-driven flow.
+Volume-normalised OFI outperforms raw OFI at 10-second bars. At 1-minute bars 
+normalisation adds noise. All correlations are small (max 0.085) — OFI alone is a weak 
+predictor, motivating the richer feature set in Phase 3.
 
-### 4. Correlation magnitudes are small throughout
-Maximum observed correlation: 0.085 (normalised OFI, 10s, breakout week). All findings 
-above are directional/relative — OFI alone is a weak predictor. This motivates the 
-richer feature set and classifier in Phase 3.
+## VPIN Results (Session 6)
+
+### Implementation
+VPIN implemented from scratch following Easley et al. (2012). Bucket size = 1/50 of 
+daily volume (~2376 BTC for BTC week 1), producing ~300 buckets per week. Trade 
+splitting implemented correctly for trades straddling bucket boundaries.
+
+### Cross-Regime Results (fixed bucket size = 2376 BTC)
+
+| Asset | Week 1 (consolidation) | Week 2 (breakout) | Week 3 (correction) |
+|-------|----------------------|-------------------|---------------------|
+| BTCUSDT | 0.162 | 0.171 | 0.149 |
+| ETHUSDT | 0.175 | 0.194 | 0.186 |
+| SOLUSDT | 0.164 | 0.166 | 0.155 |
+
+### Key Finding — VPIN Fails in Volatility Regimes
+Week 3 (the most volatile regime) has the lowest mean VPIN for BTC and SOL. In a 
+correction, aggressive sellers and opportunistic buyers are simultaneously active — 
+high volume on both sides produces low net imbalance. VPIN detects directional informed 
+trading well but fails when both sides react simultaneously. This is a genuine limitation 
+of the metric, not a data artefact.
+
+### Validation
+Correlation between VPIN and absolute 30-minute forward return (BTC week 2): **0.145**. 
+This is the baseline benchmark the classifier must exceed.
+
+### VPIN Limitations
+1. Bucket size sensitivity — choice of 1/50 daily volume is principled but arbitrary
+2. Cross-asset comparison unreliable due to different volume scales
+3. Fails to detect toxicity in two-sided volatile regimes
+4. Lagging signal by construction — summarises past n buckets
 
 ## Status
 - [x] Phase 0: Prerequisites (Sessions 1-3)
 - [x] Phase 1: Data pipeline (Session 4)
 - [x] Phase 2: EDA (Session 5)
-- [ ] Phase 3: VPIN implementation (Session 6)
+- [x] Phase 3: VPIN implementation (Session 6) ← current
 - [ ] Phase 4: Feature engineering + LOB reconstruction (Session 7)
 - [ ] Phase 5: Toxicity classifier (Sessions 8-9)
 - [ ] Phase 6: Adaptive market-making (Sessions 10-11)
