@@ -52,8 +52,12 @@ gap detection) → parquet. One file per asset per week.
 
 ### Order Book Data
 Raw JSON lines → order book reconstruction (snapshot initialisation + sequential delta 
-application) → time-series of derived features sampled at regular intervals → parquet. 
-Implemented in Session 7.
+application) → feature extraction at each trade timestamp → parquet. Book state is 
+carried across midnight boundaries for continuity. Processing time: ~100s per asset-day.
+
+### Feature Matrix
+Book features + trade features + VPIN + toxicity label merged into a single parquet 
+per asset-week. One row per trade, ~20 feature columns plus label.
 
 ## EDA Findings (Session 5)
 
@@ -112,12 +116,123 @@ This is the baseline benchmark the classifier must exceed.
 3. Fails to detect toxicity in two-sided volatile regimes
 4. Lagging signal by construction — summarises past n buckets
 
+## Feature Engineering & Toxicity Labelling (Session 7)
+
+### Order Book Reconstruction
+Bybit ob500 files contain ~2 snapshots and ~863k delta updates per day per asset. 
+Reconstruction streams through the file maintaining a running book state (two 
+dictionaries: price → size for bids and asks). For each delta, levels with size > 0 
+are updated; levels with size = 0 are deleted. Book state carries across midnight 
+boundaries between consecutive days.
+
+Features are extracted at each trade timestamp (Option B sampling — "what did the book 
+look like when this trade arrived?"), producing one feature row per trade. This ensures 
+perfect alignment between features and the prediction target.
+
+### Book-Derived Features
+- **Spread:** best ask − best bid. Median = $0.10 (minimum tick) for BTC, max = $31.70 
+  during momentary dislocations. BTC sits at the tightest possible spread most of the time.
+- **Microprice:** size-weighted midpoint = (best_bid × ask_size + best_ask × bid_size) / 
+  (bid_size + ask_size). Better estimate of fair value than simple midpoint.
+- **Depth imbalance at levels 1, 5, 10, 25:** 
+  (bid_volume_top_N − ask_volume_top_N) / (bid_volume_top_N + ask_volume_top_N). 
+  Ranges from −1 (all volume on ask side) to +1 (all volume on bid side).
+- **Bid/ask pressure:** volume concentration in top 5 levels relative to top 25. 
+  High pressure = volume concentrated near best price, ready to absorb incoming trades.
+- **Pressure imbalance:** bid_pressure − ask_pressure.
+
+### Trade-Derived Features
+- **Trade intensity (1s, 5s, 10s windows):** rolling count of trades using searchsorted 
+  on timestamp arrays. No loops — O(n log n) via binary search.
+- **Volume acceleration:** volume in last 5s / (volume in last 30s × 5/30). Values > 1.0 
+  mean trading is speeding up. Computed via cumulative sums + searchsorted.
+- **Signed volume imbalance (10s):** sum of sign × qty in last 10 seconds. Measures net 
+  directional pressure. Computed via cumulative sums of signed volume.
+- **VPIN:** forward-filled from Session 6 bucket-level computation onto trade timestamps 
+  using searchsorted. ~1.6M trades per week in warmup period before first VPIN value.
+
+### Toxicity Definition
+
+**Label:** A trade is toxic if the price moves adversely by more than 8 bps within 10 
+seconds in the direction of the trade. Buy is toxic if price rises > 8 bps; sell is 
+toxic if price falls > 8 bps.
+
+**Parameter selection (data-driven):**
+- **Horizon (Y = 10 seconds):** Long enough for informed trades to show impact, short 
+  enough to measure the trade's effect rather than background drift. Consistent with 
+  Cartea & Sánchez-Betancourt (2023).
+- **Threshold (X = 8 bps):** Chosen from empirical distribution of absolute 10-second 
+  forward returns on BTC Sep 9:
+
+| Percentile | Absolute 10s forward return (bps) |
+|------------|-----------------------------------|
+| Median | 2.42 |
+| 75th | 4.79 |
+| 90th | 8.09 |
+| 95th | 11.11 |
+| 99th | 30.50 |
+
+8 bps ≈ 90th percentile of absolute moves. Directional filtering (requiring the move 
+to match trade sign) reduces the label rate from ~10% to ~5.5%, as expected.
+
+**Tradeoff reasoning:** Threshold too small → flags normal market noise, hurting precision. 
+Threshold too large → misses real toxic trades, hurting recall. 90th percentile balances 
+selectivity with sufficient positive examples for classifier training.
+
+### Toxic Rate by Regime — Key Finding
+
+| Asset | Week 1 (consolidation) | Week 2 (breakout) | Week 3 (stress) |
+|-------|----------------------|-------------------|-----------------|
+| BTCUSDT | 5.2% | 4.2% | **14.1%** |
+| ETHUSDT | 7.0% | 5.7% | **16.8%** |
+| SOLUSDT | 6.7% | 6.9% | **23.4%** |
+
+**Finding 1 — Stress regimes have 3-4x higher toxic rates.** During corrections, informed 
+traders (or faster-reacting traders) dominate flow. This is consistent with microstructure 
+theory: adverse selection intensifies during high-uncertainty periods.
+
+**Finding 2 — Less liquid assets are more vulnerable.** SOL at 23.4% toxic rate during 
+stress vs BTC at 14.1%. Less uninformed flow to dilute the informed signal.
+
+**Finding 3 — VPIN contradicts toxic rate in stress regimes.** VPIN was lowest in week 3 
+(Session 6) but toxic rate was highest. VPIN measures net imbalance; toxicity measures 
+adverse price impact. In a crash, both sides trade aggressively (low VPIN) but the 
+informed side consistently wins (high toxicity). This is the strongest argument for a 
+richer classifier over VPIN alone.
+
+### Toxic Trade Clustering
+99.2% of toxic trades are within 1 second of another toxic trade. Median gap = 0.0s. 
+Toxic trades arrive in rapid bursts — consistent with informed agents executing 
+aggressively over short windows. Implication: the classifier is really predicting 
+"toxic episodes" rather than individual toxic trades.
+
+### Feature-Toxicity Signal Strength (BTC Sep 9)
+
+| Feature | Toxic mean | Non-toxic mean | Ratio |
+|---------|-----------|---------------|-------|
+| Signed vol imbalance 10s | 150.0 | 21.6 | **6.9x** |
+| Depth imbalance L1 | 0.045 | 0.012 | **3.7x** |
+| Trade intensity 1s | 1044 | 316 | **3.3x** |
+| Spread | 0.593 | 0.246 | **2.4x** |
+| Volume acceleration | 1.98 | 1.69 | 1.2x |
+| Pressure imbalance | 0.000 | 0.006 | ~0x |
+
+**Strongest signals:** Signed volume imbalance, trade intensity, and depth imbalance — 
+all trade-flow features rather than deep book structure. Spread is useful (market makers 
+already widen during toxic episodes). Volume acceleration and pressure imbalance show 
+minimal signal.
+
+### Missing Data
+- ETH week 3: missing Feb 28, Mar 1-2 orderbook files (4 of 7 days available)
+- SOL week 3: missing Feb 24 orderbook file (6 of 7 days available)
+- Not critical for classifier training — sufficient data across other asset-weeks.
+
 ## Status
 - [x] Phase 0: Prerequisites (Sessions 1-3)
 - [x] Phase 1: Data pipeline (Session 4)
 - [x] Phase 2: EDA (Session 5)
-- [x] Phase 3: VPIN implementation (Session 6) ← current
-- [ ] Phase 4: Feature engineering + LOB reconstruction (Session 7)
+- [x] Phase 3: VPIN implementation (Session 6)
+- [x] Phase 4: Feature engineering + LOB reconstruction (Session 7) ← current
 - [ ] Phase 5: Toxicity classifier (Sessions 8-9)
 - [ ] Phase 6: Adaptive market-making (Sessions 10-11)
 - [ ] Phase 7: Writeup and packaging (Sessions 12-13)
