@@ -80,16 +80,16 @@ def compute_vpin(df, bucket_size, n_buckets=50):
 
 
 # total volume over the week
-for asset in ASSETS:
-  df1 = pd.read_parquet(f"data/processed/{asset}/week1.parquet")
-  fixed_bucket_size = df1['qty'].sum() / 7 / 50
-  print("Asset:", asset)
-  for week in ['week1', 'week2', 'week3']:
-      df = pd.read_parquet(f"data/processed/{asset}/{week}.parquet")
-      result = compute_vpin(df, fixed_bucket_size, n_buckets=50)
-      print(f"{week}: mean VPIN = {result['vpin'].mean():.4f}, "
-            f"max VPIN = {result['vpin'].max():.4f}, "
-            f"buckets = {len(result)}")
+# for asset in ASSETS:
+#   df1 = pd.read_parquet(f"data/processed/{asset}/week1.parquet")
+#   fixed_bucket_size = df1['qty'].sum() / 7 / 50
+#   print("Asset:", asset)
+#   for week in ['week1', 'week2', 'week3']:
+#       df = pd.read_parquet(f"data/processed/{asset}/{week}.parquet")
+#       result = compute_vpin(df, fixed_bucket_size, n_buckets=50)
+#       print(f"{week}: mean VPIN = {result['vpin'].mean():.4f}, "
+#             f"max VPIN = {result['vpin'].max():.4f}, "
+#             f"buckets = {len(result)}")
 
 
 
