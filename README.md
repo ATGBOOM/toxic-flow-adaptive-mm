@@ -309,12 +309,31 @@ coefficients (standardised):
 - ask/bid_pressure: −0.13/−0.10 (thin books → more toxic)
 - vpin: +0.04 (barely matters once other features are present)
 
-### Open Questions (to investigate)
-1. Is CatBoost underperformance due to balanced class weights inflating probabilities?
-2. Would 2M training rows help CatBoost learn better patterns?
-3. Does adding an asset indicator feature improve cross-asset pooling?
-4. What do precision-recall tradeoffs look like at operationally useful thresholds?
-5. Feature leakage check: confirmed clean — all features are backward-looking.
+### Investigation Results (Session 8 continued)
+
+**Investigation 1 — Class weighting:** Unbalanced CatBoost chosen. Balanced weights 
+inflate predicted probabilities above true base rate, destroying calibration (Brier 0.144 
+vs 0.051) with no improvement in AP. For a threshold-based strategy, miscalibrated 
+probabilities make thresholds meaningless.
+
+**Investigation 2 — Training data size:** 2M vs 500k rows shows no improvement (AP 
+0.089 vs 0.093 on similar regime). Model is feature-limited not data-limited. On OOD 
+week 3, more data hurts (AP 0.181 vs 0.248) — richer exposure to calm-regime patterns 
+makes the model more confidently wrong under stress.
+
+**Investigation 3 — Asset indicator:** Adding asset_id as a feature produces no 
+meaningful change (AP difference <0.002 across all splits). Microstructure features 
+are sufficient statistics for per-asset risk characteristics — the model learns 
+"SOL-like behaviour" from trade intensity and imbalance without needing the asset label.
+
+**Investigation 4 — Operating threshold:** Breakeven toxicity probability for market 
+maker = S/(S+L) = 5/(5+8) = 0.38. Best classifier precision = 0.30 at t=0.20 on week 3. 
+Classifier does not clear breakeven for a binary pull-quotes decision. Recommended use: 
+continuous spread widening proportional to p_toxic rather than binary on/off.
+
+### Final Classifier Choice
+Unbalanced CatBoost, trained on weeks 1+2, 500k stratified subsample. Used for 
+adaptive market-making with continuous spread adjustment, not binary quote pulling.
 
 ## Status
 - [x] Phase 0: Prerequisites (Sessions 1-3)
@@ -322,8 +341,8 @@ coefficients (standardised):
 - [x] Phase 2: EDA (Session 5)
 - [x] Phase 3: VPIN implementation (Session 6)
 - [x] Phase 4: Feature engineering + LOB reconstruction (Session 7)
-- [x] Phase 5a: Toxicity classifier — initial models (Session 8) ← current
-- [ ] Phase 5b: Toxicity classifier — investigation & evaluation (Session 8 continued)
+- [x] Phase 5a: Toxicity classifier — initial models (Session 8)
+- [x] Phase 5b: Toxicity classifier — investigations (Session 8 continued)
 - [ ] Phase 5c: Rigorous evaluation (Session 9)
 - [ ] Phase 6: Adaptive market-making (Sessions 10-11)
 - [ ] Phase 7: Writeup and packaging (Sessions 12-13)
