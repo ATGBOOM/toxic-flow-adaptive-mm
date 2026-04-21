@@ -227,12 +227,103 @@ minimal signal.
 - SOL week 3: missing Feb 24 orderbook file (6 of 7 days available)
 - Not critical for classifier training — sufficient data across other asset-weeks.
 
+## Classifier Results (Session 8)
+
+### Design Decisions
+See `docs/CLASSIFIER_DESIGN.md` for full rationale on each decision.
+
+**Feature engineering at load time (3 new features):**
+- `spread_bps` = spread / midprice × 10000 (cross-asset comparable)
+- `microprice_minus_mid` = microprice − midprice (book asymmetry without raw price level)
+- `qty_normalised` = qty / rolling 1000-trade mean (relative trade size, cross-asset comparable)
+
+**Excluded columns:**
+- `sign` — excluded to enforce direction symmetry; toxicity should be symmetric in theory
+- `price`, `midprice`, `microprice` — raw price levels meaningless across assets/time
+- `fwd_10s_bps` — forward-looking return used to compute label; including it is pure leakage
+- `qty` — replaced by normalised version; raw qty conflates asset identity with trade size
+
+**Final feature set (16 features):** spread_bps, microprice_minus_mid, qty_normalised, 
+depth_imbalance_1/5/10/25, bid_pressure, ask_pressure, pressure_imbalance, 
+trade_intensity_1s/5s/10s, volume_acceleration, signed_vol_imbalance_10s, vpin.
+
+**Training splits:**
+- Split 1: Train week 1 → test weeks 2 and 3 separately
+- Split 2: Train weeks 1+2 → test week 3
+- Subsampling: 500k stratified random from training weeks, full test sets
+
+**Models:** VPIN-only baseline (threshold classifier), logistic regression, CatBoost (gradient boosted trees)
+
+### Results
+
+#### Split 1: Train week 1 → Test week 2 (similar regime)
+
+| Model | AP | AUC | Brier |
+|-------|------|------|-------|
+| VPIN baseline | 0.055 | 0.506 | 0.065 |
+| Logistic regression | 0.070 | 0.593 | 0.052 |
+| CatBoost (balanced) | 0.095 | 0.673 | 0.144 |
+
+#### Split 1: Train week 1 → Test week 3 (stress regime, out-of-distribution)
+
+| Model | AP | AUC | Brier |
+|-------|------|------|-------|
+| VPIN baseline | 0.177 | 0.507 | 0.148 |
+| Logistic regression | 0.281 | 0.650 | 0.155 |
+| CatBoost (balanced) | 0.242 | 0.616 | 0.176 |
+
+#### Split 2: Train weeks 1+2 → Test week 3
+
+| Model | AP | AUC | Brier |
+|-------|------|------|-------|
+| VPIN baseline | 0.177 | 0.507 | 0.148 |
+| Logistic regression | 0.294 | 0.664 | 0.155 |
+| CatBoost (balanced) | 0.244 | 0.600 | 0.266 |
+
+### Key Findings
+
+**Finding 1 — VPIN is no better than random as a standalone classifier.** AUC of 0.506 
+across all tests (0.5 = random). AP matches base rate exactly. VPIN cannot rank which 
+trades are toxic. This quantitatively confirms the Session 6 observation that VPIN fails 
+in two-sided volatile regimes.
+
+**Finding 2 — Logistic regression outperforms CatBoost on out-of-distribution data.** 
+On week 2 (similar regime to training), CatBoost wins: AP 0.095 vs 0.070. On week 3 
+(stress, OOD), logistic regression wins: AP 0.281 vs 0.242. CatBoost overfits to 
+training-regime patterns that don't transfer. Classic bias-variance tradeoff in action.
+
+**Finding 3 — CatBoost is badly miscalibrated.** Brier scores of 0.144-0.266 compared 
+to logreg's 0.052-0.155. The `auto_class_weights='Balanced'` parameter inflates 
+predicted probabilities. The model's rankings may be reasonable but its probability 
+estimates are not trustworthy.
+
+**Finding 4 — Adding breakout data to training marginally helps.** Split 2 logreg 
+(trained on weeks 1+2) gets AP 0.294 vs Split 1's 0.281 on week 3. CatBoost barely 
+changes (0.244 vs 0.242). More regime diversity helps the simple model slightly.
+
+**Finding 5 — Trade intensity dominates feature importance.** Logistic regression 
+coefficients (standardised):
+- trade_intensity_10s: +0.48 (strongest by far)
+- trade_intensity_5s: −0.36 (together with 10s, captures burst shape)
+- volume_acceleration: +0.18
+- ask/bid_pressure: −0.13/−0.10 (thin books → more toxic)
+- vpin: +0.04 (barely matters once other features are present)
+
+### Open Questions (to investigate)
+1. Is CatBoost underperformance due to balanced class weights inflating probabilities?
+2. Would 2M training rows help CatBoost learn better patterns?
+3. Does adding an asset indicator feature improve cross-asset pooling?
+4. What do precision-recall tradeoffs look like at operationally useful thresholds?
+5. Feature leakage check: confirmed clean — all features are backward-looking.
+
 ## Status
 - [x] Phase 0: Prerequisites (Sessions 1-3)
 - [x] Phase 1: Data pipeline (Session 4)
 - [x] Phase 2: EDA (Session 5)
 - [x] Phase 3: VPIN implementation (Session 6)
-- [x] Phase 4: Feature engineering + LOB reconstruction (Session 7) ← current
-- [ ] Phase 5: Toxicity classifier (Sessions 8-9)
+- [x] Phase 4: Feature engineering + LOB reconstruction (Session 7)
+- [x] Phase 5a: Toxicity classifier — initial models (Session 8) ← current
+- [ ] Phase 5b: Toxicity classifier — investigation & evaluation (Session 8 continued)
+- [ ] Phase 5c: Rigorous evaluation (Session 9)
 - [ ] Phase 6: Adaptive market-making (Sessions 10-11)
 - [ ] Phase 7: Writeup and packaging (Sessions 12-13)

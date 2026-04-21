@@ -1,5 +1,6 @@
 # src/models/data_loader.py
 
+import gc
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -89,7 +90,7 @@ def subsample_stratified(df, n=500_000, seed=42):
     return result
 
 
-def prepare_split(data_dir, train_weeks, test_weeks_dict, n_train=500_000, seed=42):
+def prepare_split(data_dir, train_weeks, test_weeks_dict, n_train=500_000, seed=42, include_asset=False):
     """
     Prepare a full train/test split.
 
@@ -103,7 +104,7 @@ def prepare_split(data_dir, train_weeks, test_weeks_dict, n_train=500_000, seed=
     Returns:
         dict with 'train' and test set DataFrames
     """
-    features = get_feature_columns(include_asset=False)
+    features = get_feature_columns(include_asset)
 
     print("Loading training data...")
     train_full = load_weeks(data_dir, train_weeks)
@@ -124,6 +125,8 @@ def prepare_split(data_dir, train_weeks, test_weeks_dict, n_train=500_000, seed=
         test = load_weeks(data_dir, weeks)
         result[f'X_test_{name}'] = test[features].values
         result[f'y_test_{name}'] = test['toxic'].values
+        del test
+        gc.collect()
 
     return result
 
