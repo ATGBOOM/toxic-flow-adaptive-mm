@@ -335,6 +335,148 @@ continuous spread widening proportional to p_toxic rather than binary on/off.
 Unbalanced CatBoost, trained on weeks 1+2, 500k stratified subsample. Used for 
 adaptive market-making with continuous spread adjustment, not binary quote pulling.
 
+## Rigorous Evaluation (Session 9)
+
+### Calibration — Reliability Diagrams
+
+Both logistic regression and GBT are **underconfident**: predicted probabilities are 
+systematically lower than the true toxic rate in each bin. The miscalibration worsens 
+at higher predicted probabilities — precisely where accurate estimates matter most for 
+spread adjustment decisions. For logistic regression, the calibration is close to the 
+diagonal at low predicted probabilities but diverges substantially at higher values. 
+For GBT, the gap between predicted and actual rate is roughly uniform across all 
+probability levels.
+
+**Implication for market-making:** Underconfidence means the model predicts lower toxicity 
+than actually exists. A spread-widening strategy scaled to p_toxic will systematically 
+under-widen, leaving the market maker exposed to more adverse selection than the signal 
+suggests. This is unrecognised risk — worse than overconfidence, which would merely cost 
+revenue from unnecessary spread widening.
+
+**Key limitation:** The classifier is best calibrated in the low-toxicity regime where 
+intervention is not needed, and least calibrated in the high-toxicity regime where 
+accurate probability estimates matter most.
+
+### Brier Score Decomposition
+
+| Model | Reliability | Resolution | Uncertainty | Brier | Baseline |
+|-------|-------------|------------|-------------|-------|----------|
+| Logistic regression | 0.0140 | 0.0034 | 0.1454 | 0.1560 | 0.1454 |
+| GBT | 0.0075 | 0.0032 | 0.1454 | 0.1498 | 0.1454 |
+
+Both models score above the baseline Brier of 0.1454 (always predicting the base rate), 
+meaning neither beats the trivial predictor on this metric. GBT is better calibrated 
+(reliability 0.0075 vs 0.0140) but resolution is near-identical and very low for both — 
+neither model discriminates strongly between toxic and non-toxic trades. The low 
+resolution directly reflects that almost all predictions cluster near zero: the model 
+rarely varies its output, so bin-level actual rates barely deviate from the overall base rate.
+
+**Root cause:** The feature set captures aggregate microstructure state but cannot resolve 
+individual trade identity. Any single trade arriving during a high-intensity burst may or 
+may not be toxic — the features are informative at the population level but noisy at the 
+individual prediction level.
+
+### Precision-Recall Threshold Analysis
+
+**Logistic Regression**
+
+| Threshold | Precision | Recall | FPR | Intervention Rate |
+|-----------|-----------|--------|-----|-------------------|
+| 0.10 | 0.383 | 0.159 | 0.055 | 0.073 |
+| 0.15 | 0.403 | 0.066 | 0.021 | 0.029 |
+| 0.20 | 0.416 | 0.036 | 0.011 | 0.015 |
+| 0.25 | 0.432 | 0.023 | 0.006 | 0.009 |
+| 0.30 | 0.421 | 0.015 | 0.004 | 0.006 |
+
+**GBT**
+
+| Threshold | Precision | Recall | FPR | Intervention Rate |
+|-----------|-----------|--------|-----|-------------------|
+| 0.10 | 0.245 | 0.543 | 0.359 | 0.391 |
+| 0.15 | 0.286 | 0.255 | 0.136 | 0.157 |
+| 0.20 | 0.300 | 0.082 | 0.041 | 0.049 |
+| 0.25 | 0.283 | 0.023 | 0.012 | 0.014 |
+| 0.30 | 0.270 | 0.009 | 0.005 | 0.006 |
+
+**Market maker breakeven precision = 0.38.** Logistic regression clears this bar at all 
+thresholds shown. GBT never clears it.
+
+**Key finding:** While logistic regression achieves precision above the market maker's 
+breakeven at all tested thresholds, recall remains below 16% even at the lowest threshold. 
+The classifier identifies a statistically detectable subset of toxic flow but leaves the 
+market maker exposed to over 84% of adverse fills, limiting its practical value as a 
+standalone quote-adjustment signal.
+
+**GBT tradeoff:** At T=0.10, GBT achieves recall of 0.543 but FPR of 0.359 — flagging 
+39% of all trades as potentially toxic. This intervention rate is operationally 
+unworkable and would alienate the uninformed flow that provides market-making revenue.
+
+### SHAP Feature Importance (GBT)
+
+Mean SHAP values (log-odds space), all features:
+
+| Feature | Mean SHAP | Interpretation |
+|---------|-----------|----------------|
+| trade_intensity_10s | 0.319 | Dominant predictor |
+| trade_intensity_5s | 0.181 | Burst persistence signal |
+| volume_acceleration | 0.055 | Accelerating activity |
+| trade_intensity_1s | 0.047 | Immediate burst onset |
+| ask_pressure | 0.043 | Book thinning |
+| spread_bps | 0.035 | Stress regime marker |
+| vpin | 0.008 | Near-zero contribution |
+
+**Trade intensity across all three windows (1s, 5s, 10s) is the dominant predictor**, 
+with mean SHAP of 0.319 for the 10-second window. This is consistent with the 
+microstructure intuition that informed traders exhibit urgency — executing rapidly before 
+their signal decays — whereas uninformed liquidity traders arrive closer to a random 
+Poisson process. GBT learns the temporal shape of intensity bursts across all three 
+windows simultaneously, capturing whether a spike at 1s persists through 5s and 10s — 
+an interaction logistic regression cannot model.
+
+**Spread_bps shows a positive mean SHAP of 0.035**, associating wider spreads with higher 
+predicted toxicity. While this appears to contradict the standard microstructure intuition 
+that tight spreads attract informed flow, it likely reflects a regime-specific correlation: 
+in the week 3 stress period, spread widening co-occurs with volatile bursts during which 
+informed activity is highest, and the model learns this correlation rather than the general 
+principle. This may not generalise beyond the stress regime.
+
+**VPIN contributes near-zero mean SHAP of 0.008**, confirming the Session 6 finding 
+quantitatively: once trade intensity and order book features are included, VPIN adds no 
+incremental discriminative power. The two-sided volatile regime that breaks VPIN as a 
+standalone metric also renders it redundant within a richer feature set.
+
+### Bootstrap Confidence Intervals on AP
+
+Bootstrapped on 50,000-trade subsample, 1,000 iterations:
+
+| Model | Mean AP | 95% CI |
+|-------|---------|--------|
+| Logistic regression | 0.295 | [0.287, 0.304] |
+| GBT | 0.249 | [0.243, 0.256] |
+
+Confidence intervals do not overlap. The logistic regression outperformance on the week 3 
+stress regime is statistically robust, not a sampling artefact. The gap of ~0.046 AP points 
+is consistent across bootstrap resamples.
+
+### Overall Evaluation Conclusion
+
+Across all four evaluation frameworks, the classifier tells a consistent story: both models 
+systematically underestimate toxicity probability, achieve discrimination below the base 
+rate benchmark on Brier score, and capture at most 16% of toxic flow at operationally 
+viable precision thresholds.
+
+The signal is statistically detectable — logistic regression AP of 0.295 vs VPIN baseline 
+of 0.177, with non-overlapping bootstrap CIs confirming the gap is real. But it is 
+insufficient for standalone deployment. The fundamental constraint is the resolution of 
+publicly available trade data: without millisecond-level queue position, order-to-trade 
+ratios, or participant identifiers, individual trade toxicity cannot be resolved with 
+high confidence.
+
+This finding motivates the analytical approach in Session 10: rather than classifying 
+individual trades, the Cartea & Sánchez-Betancourt (2025) framework derives an optimal 
+price adjustment that accounts for the aggregate probability of informed flow — sidestepping 
+the individual classification problem entirely.
+
 ## Status
 - [x] Phase 0: Prerequisites (Sessions 1-3)
 - [x] Phase 1: Data pipeline (Session 4)
@@ -343,6 +485,6 @@ adaptive market-making with continuous spread adjustment, not binary quote pulli
 - [x] Phase 4: Feature engineering + LOB reconstruction (Session 7)
 - [x] Phase 5a: Toxicity classifier — initial models (Session 8)
 - [x] Phase 5b: Toxicity classifier — investigations (Session 8 continued)
-- [ ] Phase 5c: Rigorous evaluation (Session 9)
+- [x] Phase 5c: Rigorous evaluation (Session 9)
 - [ ] Phase 6: Adaptive market-making (Sessions 10-11)
 - [ ] Phase 7: Writeup and packaging (Sessions 12-13)
