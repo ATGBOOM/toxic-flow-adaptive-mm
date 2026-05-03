@@ -476,15 +476,3 @@ This finding motivates the analytical approach in Session 10: rather than classi
 individual trades, the Cartea & Sánchez-Betancourt (2025) framework derives an optimal 
 price adjustment that accounts for the aggregate probability of informed flow — sidestepping 
 the individual classification problem entirely.
-
-## Status
-- [x] Phase 0: Prerequisites (Sessions 1-3)
-- [x] Phase 1: Data pipeline (Session 4)
-- [x] Phase 2: EDA (Session 5)
-- [x] Phase 3: VPIN implementation (Session 6)
-- [x] Phase 4: Feature engineering + LOB reconstruction (Session 7)
-- [x] Phase 5a: Toxicity classifier — initial models (Session 8)
-- [x] Phase 5b: Toxicity classifier — investigations (Session 8 continued)
-- [x] Phase 5c: Rigorous evaluation (Session 9)
-- [x] Phase 6: Adaptive market-making (Sessions 10-11)
-- [x] Phase 7: Writeup and packaging (Sessions 12-13)
