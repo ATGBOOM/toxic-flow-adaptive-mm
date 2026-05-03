@@ -487,4 +487,4 @@ the individual classification problem entirely.
 - [x] Phase 5b: Toxicity classifier — investigations (Session 8 continued)
 - [x] Phase 5c: Rigorous evaluation (Session 9)
 - [x] Phase 6: Adaptive market-making (Sessions 10-11)
-- [ ] Phase 7: Writeup and packaging (Sessions 12-13)
+- [x] Phase 7: Writeup and packaging (Sessions 12-13)
