@@ -20,7 +20,8 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from src.models.classifier.data_loader import prepare_split, get_feature_columns, load_asset_week, ASSETS
 from src.models.classifier.classifier import ToxicityClassifier
 
-DATA_DIR   = "data/processed/features"
+_ROOT = Path(__file__).parent.parent.parent
+DATA_DIR   = _ROOT / 'data' / 'processed' / 'features'
 MODELS_DIR = Path("results/models")
 PREDS_DIR  = Path("results/predictions")
 
@@ -28,7 +29,20 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 PREDS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def run():
+def run() -> None:
+    """Train on Split 2 (weeks 1+2) and save models and per-asset week-3 predictions.
+
+    Trains ToxicityClassifier on all three assets pooled for weeks 1 and 2,
+    saves the fitted logreg, scaler, and gbt objects to results/models/, then
+    generates per-asset probability predictions on week 3 and writes them to
+    results/predictions/split2_week3_predictions.parquet.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
     features = get_feature_columns(include_asset=False)
 
     # ── Train on weeks 1+2 ──────────────────────────────────────────
@@ -93,7 +107,6 @@ def run():
     print(f"Shape: {predictions.shape}")
     print(f"\nPer-asset toxic rates:")
     print(predictions.groupby('asset')['y_true'].mean().round(3).to_string())
-
 
 
 if __name__ == "__main__":

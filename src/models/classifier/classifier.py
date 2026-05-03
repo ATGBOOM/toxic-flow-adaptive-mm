@@ -1,13 +1,15 @@
-# src/models/classifier.py
+# src/models/classifier/classifier.py
 
 import gc
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     precision_recall_curve, average_precision_score,
-    brier_score_loss, roc_auc_score, log_loss
+    brier_score_loss, roc_auc_score,
 )
 import time
 import warnings
@@ -22,27 +24,43 @@ try:
 except ImportError:
     from xgboost import XGBClassifier
     BOOST_LIB = 'xgboost'
-    
+
 
 class VPINBaseline:
-    """Threshold classifier using VPIN only."""
-    
-    def __init__(self, vpin_index):
-        """
+    """Threshold classifier that uses raw VPIN as a toxicity probability score."""
+
+    def __init__(self, vpin_index: int) -> None:
+        """Initialise the VPIN baseline with the column index of VPIN in X.
+
         Args:
-            vpin_index: column index of VPIN in the feature matrix
+            vpin_index: Integer column index of the VPIN feature in the
+                feature matrix passed to predict_proba.
         """
         self.vpin_index = vpin_index
-    
-    def fit(self, X, y):
-        """No fitting needed — VPIN is precomputed."""
-        return self
-    
-    def predict_proba(self, X):
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> 'VPINBaseline':
+        """No fitting needed — VPIN is precomputed.
+
+        Args:
+            X: Feature matrix (unused).
+            y: Label vector (unused).
+
+        Returns:
+            self
         """
-        Use VPIN as raw probability score.
-        VPIN ranges ~0.13-0.19, so it's not a calibrated probability,
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Use VPIN as raw probability score.
+
+        VPIN ranges ~0.13-0.19, so it is not a calibrated probability,
         but precision-recall curves only need ranking, not calibration.
+
+        Args:
+            X: Feature matrix with VPIN at column self.vpin_index.
+
+        Returns:
+            Array of shape (n_samples, 2) with columns [P(not toxic), P(toxic)].
         """
         vpin = X[:, self.vpin_index]
         # Return as 2-column array to match sklearn convention [P(not toxic), P(toxic)]
@@ -50,18 +68,31 @@ class VPINBaseline:
 
 
 class ToxicityClassifier:
-    """Wraps all three models and handles training/evaluation."""
-    
-    def __init__(self, feature_names):
+    """Wraps VPIN baseline, logistic regression, and gradient-boosted trees."""
+
+    def __init__(self, feature_names: list[str]) -> None:
+        """Initialise the classifier ensemble.
+
+        Args:
+            feature_names: Ordered list of feature names matching the columns
+                of the training matrix. Must contain 'vpin'.
+        """
         self.feature_names = feature_names
         self.vpin_index = feature_names.index('vpin')
         self.scaler = StandardScaler()
-        self.models = {}
-        self.train_time = {}
-    
-    def fit(self, X_train, y_train):
-        """Fit all three models."""
-        
+        self.models: dict = {}
+        self.train_time: dict = {}
+
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
+        """Fit all three models on the training set.
+
+        Args:
+            X_train: Feature matrix of shape (n_samples, n_features).
+            y_train: Binary label vector of shape (n_samples,).
+
+        Returns:
+            None
+        """
         # 1. VPIN baseline (no fitting)
         print("Fitting VPIN baseline...")
         vpin_model = VPINBaseline(self.vpin_index)
@@ -69,22 +100,22 @@ class ToxicityClassifier:
         self.models['vpin'] = vpin_model
         self.train_time['vpin'] = 0
         print("  Done (no fitting needed)")
-        
+
         # 2. Logistic regression (needs standardised features)
         print("Fitting logistic regression...")
         X_scaled = self.scaler.fit_transform(X_train)
-        
+
         t0 = time.time()
         lr = LogisticRegression(max_iter=1000, solver='lbfgs', random_state=42)
         lr.fit(X_scaled, y_train)
         self.train_time['logreg'] = time.time() - t0
         self.models['logreg'] = lr
         print(f"  Done in {self.train_time['logreg']:.1f}s")
-        
+
         # 3. Gradient boosted trees
         print(f"Fitting gradient boosted trees ({BOOST_LIB})...")
         t0 = time.time()
-        
+
         if BOOST_LIB == 'catboost':
             gbt = CatBoostClassifier(
                 iterations=500,
@@ -106,13 +137,21 @@ class ToxicityClassifier:
                 scale_pos_weight=(1 - y_train.mean()) / y_train.mean(),
             )
             gbt.fit(X_train, y_train)
-        
+
         self.train_time['gbt'] = time.time() - t0
         self.models['gbt'] = gbt
         print(f"  Done in {self.train_time['gbt']:.1f}s")
-    
-    def predict_proba(self, X, model_name):
-        """Get probability predictions from a specific model."""
+
+    def predict_proba(self, X: np.ndarray, model_name: str) -> np.ndarray:
+        """Return toxicity probabilities from a specific model.
+
+        Args:
+            X: Feature matrix of shape (n_samples, n_features).
+            model_name: One of 'vpin', 'logreg', or 'gbt'.
+
+        Returns:
+            1-D array of P(toxic) of shape (n_samples,).
+        """
         if model_name == 'logreg':
             X_scaled = self.scaler.transform(X)
             return self.models[model_name].predict_proba(X_scaled)[:, 1]
@@ -120,33 +159,51 @@ class ToxicityClassifier:
             return self.models[model_name].predict_proba(X)[:, 1]
         else:
             return self.models[model_name].predict_proba(X)[:, 1]
-    
-    def evaluate(self, X_test, y_test, dataset_name="test"):
-        """Evaluate all models on a test set."""
+
+    def evaluate(
+        self,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        dataset_name: str = "test",
+    ) -> dict:
+        """Evaluate all models on a test set and print a summary.
+
+        Args:
+            X_test: Feature matrix of shape (n_samples, n_features).
+            y_test: Binary label vector of shape (n_samples,).
+            dataset_name: Human-readable label for this evaluation split,
+                used in printed output.
+
+        Returns:
+            Dict keyed by model name ('vpin', 'logreg', 'gbt'), each value
+            a dict of metrics including avg_precision, auc_roc, brier_score,
+            precision_at_50_recall, precision_at_80_recall, and the full
+            precision/recall curves and raw probabilities.
+        """
         print(f"\n{'='*60}")
         print(f"Evaluation: {dataset_name}")
         print(f"  Rows: {len(y_test):,}  |  Toxic: {y_test.sum():,} ({y_test.mean():.3f})")
         print(f"{'='*60}")
-        
+
         results = {}
-        
+
         for name in ['vpin', 'logreg', 'gbt']:
             probs = self.predict_proba(X_test, name)
-            
+
             # Core metrics
             ap = average_precision_score(y_test, probs)
             auc = roc_auc_score(y_test, probs)
             brier = brier_score_loss(y_test, probs)
-            
+
             # Precision-recall at specific recall targets
             precision, recall, thresholds = precision_recall_curve(y_test, probs)
-            
+
             # Find precision at 50% and 80% recall
             idx_50 = np.where(recall >= 0.50)[0]
             p_at_50 = precision[idx_50[-1]] if len(idx_50) > 0 else 0.0
             idx_80 = np.where(recall >= 0.80)[0]
             p_at_80 = precision[idx_80[-1]] if len(idx_80) > 0 else 0.0
-            
+
             results[name] = {
                 'avg_precision': ap,
                 'auc_roc': auc,
@@ -158,7 +215,7 @@ class ToxicityClassifier:
                 'thresholds': thresholds,
                 'probs': probs,
             }
-            
+
             print(f"\n  {name:>8s}:  AP={ap:.4f}  AUC={auc:.4f}  Brier={brier:.4f}")
             print(f"           Precision@50%recall={p_at_50:.3f}  Precision@80%recall={p_at_80:.3f}")
             for threshold in THRESHOLDS:
@@ -169,12 +226,19 @@ class ToxicityClassifier:
                 precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
                 recall = tp / (tp + fn)
                 flag_rate = predicted_toxic.sum() / len(y_test)
-                print (f"Threshold: {threshold}  Precision : {precision}  Recall : {recall}  Flag Rate: {flag_rate}")
-        
+                print(f"Threshold: {threshold}  Precision : {precision}  Recall : {recall}  Flag Rate: {flag_rate}")
+
         return results
-    
-    def get_logreg_coefficients(self):
-        """Return logistic regression coefficients for interpretation."""
+
+    def get_logreg_coefficients(self) -> pd.Series:
+        """Return logistic regression coefficients sorted by absolute magnitude.
+
+        Args:
+            None
+
+        Returns:
+            pd.Series indexed by feature name, sorted descending by |coef|.
+        """
         lr = self.models['logreg']
         coefs = pd.Series(lr.coef_[0], index=self.feature_names)
         return coefs.sort_values(key=abs, ascending=False)
@@ -182,72 +246,71 @@ class ToxicityClassifier:
 
 if __name__ == "__main__":
     from data_loader import prepare_split, get_feature_columns, load_weeks
-    
-    data_dir = "data/processed/features"
-    
+
+    data_dir = str(Path(__file__).parent.parent.parent.parent / 'data' / 'processed' / 'features')
+
     # === Split 1: Train week 1, test week 2 ===
     print("\n" + "="*60)
     print("SPLIT 1a: Train week1 -> Test week2")
     print("="*60)
-    
+
     split1a = prepare_split(
         data_dir,
         train_weeks=['week1'],
         test_weeks_dict={'week2': ['week2']},
         n_train=500_000,
     )
-    
+
     features = split1a['features']
     clf1 = ToxicityClassifier(features)
     clf1.fit(split1a['X_train'], split1a['y_train'])
-    
+
     results1_w2 = clf1.evaluate(split1a['X_test_week2'], split1a['y_test_week2'], "Split1 → Week2")
-    
+
     # Free test data, keep model
     del split1a
     gc.collect()
-    
+
     # Now test on week 3 with the same model
     print("\n" + "="*60)
     print("SPLIT 1b: Train week1 -> Test week3")
     print("="*60)
-    
+
     print("Loading test data (week3)...")
     test_w3 = load_weeks(data_dir, ['week3'])
     X_test_w3 = test_w3[features].values
     y_test_w3 = test_w3['toxic'].values
     del test_w3
     gc.collect()
-    
+
     results1_w3 = clf1.evaluate(X_test_w3, y_test_w3, "Split1 → Week3")
-    
+
     print("\n\nLogistic regression coefficients:")
     print(clf1.get_logreg_coefficients().to_string())
-    
+
     del clf1, X_test_w3, y_test_w3, results1_w2, results1_w3
     gc.collect()
-    
-    
+
     # === Split 2: Train weeks 1+2, test week 3 ===
     print("\n\n" + "="*60)
     print("SPLIT 2: Train week1+week2 -> Test week3")
     print("="*60)
-    
+
     split2 = prepare_split(
         data_dir,
         train_weeks=['week1', 'week2'],
         test_weeks_dict={'week3': ['week3']},
         n_train=500_000,
     )
-    
+
     clf2 = ToxicityClassifier(features)
     clf2.fit(split2['X_train'], split2['y_train'])
-    
+
     results2_w3 = clf2.evaluate(split2['X_test_week3'], split2['y_test_week3'], "Split2 → Week3")
-    
+
     print("\n\nLogistic regression coefficients (Split 2):")
     print(clf2.get_logreg_coefficients().to_string())
-    
+
     # === Summary comparison ===
     print("\n\n" + "="*60)
     print("SUMMARY: Week 3 performance comparison")

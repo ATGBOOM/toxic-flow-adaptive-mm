@@ -1,9 +1,10 @@
 # src/models/data_loader.py
 
 import gc
-import pandas as pd
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
 
 
 # Features we pull directly from parquet
@@ -21,8 +22,19 @@ ASSETS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 WEEKS = ['week1', 'week2', 'week3']
 
 
-def load_asset_week(data_dir, asset, week):
-    """Load a single asset-week parquet and engineer features."""
+def load_asset_week(data_dir: str | Path, asset: str, week: str) -> pd.DataFrame:
+    """Load a single asset-week parquet and engineer derived features.
+
+    Args:
+        data_dir: Path to the directory containing full-feature parquets.
+        asset: Asset symbol, e.g. 'BTCUSDT'.
+        week: Week label, e.g. 'week1'.
+
+    Returns:
+        DataFrame with RAW_FEATURES plus spread_bps, microprice_minus_mid,
+        qty_normalised, asset_id, and toxic columns. Rows with NaN VPIN or
+        any remaining NaN features are dropped.
+    """
     path = Path(data_dir) / f"{asset}_{week}_full_features.parquet"
     df = pd.read_parquet(path, columns=LOAD_COLS)
 
@@ -52,8 +64,22 @@ def load_asset_week(data_dir, asset, week):
     return df
 
 
-def load_weeks(data_dir, weeks, assets=ASSETS):
-    """Load and pool multiple asset-weeks."""
+def load_weeks(
+    data_dir: str | Path,
+    weeks: list[str],
+    assets: list[str] = ASSETS,
+) -> pd.DataFrame:
+    """Load and pool multiple asset-weeks into a single DataFrame.
+
+    Args:
+        data_dir: Path to the directory containing full-feature parquets.
+        weeks: List of week labels to load, e.g. ['week1', 'week2'].
+        assets: List of asset symbols to include. Defaults to all three assets.
+
+    Returns:
+        Concatenated DataFrame of all requested asset-weeks with an index
+        reset to 0..N-1.
+    """
     dfs = []
     for asset in assets:
         for week in weeks:
@@ -65,16 +91,36 @@ def load_weeks(data_dir, weeks, assets=ASSETS):
     return combined
 
 
-def get_feature_columns(include_asset=False):
-    """Return the list of feature column names."""
+def get_feature_columns(include_asset: bool = False) -> list[str]:
+    """Return the ordered list of model input feature names.
+
+    Args:
+        include_asset: If True, append 'asset_id' as an additional feature.
+            Defaults to False.
+
+    Returns:
+        List of feature column name strings.
+    """
     features = RAW_FEATURES + ['spread_bps', 'microprice_minus_mid', 'qty_normalised']
     if include_asset:
         features.append('asset_id')
     return features
 
 
-def subsample_stratified(df, n=500_000, seed=42):
-    """Stratified subsample preserving toxic/non-toxic ratio."""
+def subsample_stratified(
+    df: pd.DataFrame, n: int = 500_000, seed: int = 42
+) -> pd.DataFrame:
+    """Stratified subsample that preserves the toxic/non-toxic class ratio.
+
+    Args:
+        df: DataFrame with a boolean 'toxic' column.
+        n: Target number of rows in the sample. If the class has fewer rows
+            than its proportional allocation, all rows of that class are used.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Shuffled DataFrame with at most n rows, preserving the toxic rate.
+    """
     toxic = df[df['toxic']]
     non_toxic = df[~df['toxic']]
 
@@ -90,19 +136,29 @@ def subsample_stratified(df, n=500_000, seed=42):
     return result
 
 
-def prepare_split(data_dir, train_weeks, test_weeks_dict, n_train=500_000, seed=42, include_asset=False):
-    """
-    Prepare a full train/test split.
+def prepare_split(
+    data_dir: str | Path,
+    train_weeks: list[str],
+    test_weeks_dict: dict[str, list[str]],
+    n_train: int = 500_000,
+    seed: int = 42,
+    include_asset: bool = False,
+) -> dict:
+    """Prepare a full train/test split as numpy arrays.
 
     Args:
-        data_dir: path to feature parquets
-        train_weeks: list of weeks for training, e.g. ['week1', 'week2']
-        test_weeks_dict: dict of {name: [weeks]}, e.g. {'week2': ['week2'], 'week3': ['week3']}
-        n_train: subsample size for training
-        seed: random seed
+        data_dir: Path to the directory containing full-feature parquets.
+        train_weeks: List of week labels used for training, e.g. ['week1', 'week2'].
+        test_weeks_dict: Mapping of split name to week list, e.g.
+            {'week2': ['week2'], 'week3': ['week3']}. Each entry produces an
+            X_test_<name> and y_test_<name> key in the result.
+        n_train: Number of training rows after stratified subsampling.
+        seed: Random seed for subsampling and shuffling.
+        include_asset: If True, include asset_id as a feature.
 
     Returns:
-        dict with 'train' and test set DataFrames
+        Dict with keys 'X_train', 'y_train', 'features', and one pair of
+        'X_test_<name>' / 'y_test_<name>' for each entry in test_weeks_dict.
     """
     features = get_feature_columns(include_asset)
 
@@ -114,7 +170,7 @@ def prepare_split(data_dir, train_weeks, test_weeks_dict, n_train=500_000, seed=
     X_train = train[features].values
     y_train = train['toxic'].values
 
-    result = {
+    result: dict = {
         'X_train': X_train,
         'y_train': y_train,
         'features': features,
@@ -133,10 +189,12 @@ def prepare_split(data_dir, train_weeks, test_weeks_dict, n_train=500_000, seed=
 
 if __name__ == "__main__":
     # Quick test: load week 1, check shapes and feature stats
-    data_dir = "data/processed/features"
+    _data_dir = str(
+        Path(__file__).parent.parent.parent.parent / 'data' / 'processed' / 'features'
+    )
 
     print("=== Quick data check ===\n")
-    df = load_asset_week(data_dir, 'BTCUSDT', 'week1')
+    df = load_asset_week(_data_dir, 'BTCUSDT', 'week1')
     features = get_feature_columns()
 
     print(f"\nShape: {df.shape}")

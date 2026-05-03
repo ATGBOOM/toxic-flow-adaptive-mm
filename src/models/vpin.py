@@ -1,30 +1,41 @@
 from pathlib import Path
-from numpy import roll
+
+import numpy as np
 import pandas as pd
 
 
 ASSETS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 WEEKS = ['WEEK1', 'WEEK2', 'WEEK3']
-DATA_DIR = Path("data/processed/BTCUSDT/week1.parquet")
+DATA_DIR = Path(__file__).parent.parent.parent / 'data' / 'processed' / 'BTCUSDT' / 'week1.parquet'
 
 
-def build_volume_bucket(df, bucket_size):
+def build_volume_bucket(df: pd.DataFrame, bucket_size: float) -> list[dict]:
+    """Split trades into fixed-volume buckets, splitting trades that span boundaries.
+
+    Args:
+        df: DataFrame with columns [timestamp, qty, sign] where sign is +1 or -1.
+        bucket_size: Target total volume (sum of qty) per bucket.
+
+    Returns:
+        List of dicts, each with keys v_buy (float), v_sell (float), and
+        timestamp (the timestamp of the trade that caused the bucket to flush).
+    """
     buckets = []
     vol = {"v_buy": 0.0, "v_sell": 0.0, "timestamp": None}
-    
+
     # extract to numpy arrays — much faster than iterrows
     qtys = df['qty'].to_numpy()
     signs = df['sign'].to_numpy()
     timestamps = df['timestamp'].to_numpy()
-    
+
     for i in range(len(qtys)):
         remaining_qty = qtys[i]
         ts = timestamps[i]
         sign = signs[i]
-        
+
         while remaining_qty > 0:
             capacity = bucket_size - (vol['v_buy'] + vol['v_sell'])
-            
+
             if remaining_qty <= capacity:
                 if sign == 1:
                     vol['v_buy'] += remaining_qty
@@ -41,11 +52,25 @@ def build_volume_bucket(df, bucket_size):
                 buckets.append(vol.copy())
                 vol = {'v_buy': 0.0, 'v_sell': 0.0, 'timestamp': None}
                 remaining_qty -= capacity
-    
+
     return buckets
 
 
-def compute_rolling_vpins(volume_buckets, n_buckets, bucket_size):
+def compute_rolling_vpins(
+    volume_buckets: list[dict], n_buckets: int, bucket_size: float
+) -> pd.DataFrame:
+    """Compute rolling VPIN over a sliding window of completed volume buckets.
+
+    Args:
+        volume_buckets: List of bucket dicts from build_volume_bucket, each
+            containing v_buy, v_sell, and timestamp.
+        n_buckets: Number of buckets in the rolling window.
+        bucket_size: Volume per bucket; used as the denominator normaliser.
+
+    Returns:
+        DataFrame with columns [timestamp, vpin]. One row per complete window,
+        timestamped at the last bucket in that window.
+    """
     vpins = []
     for i in range(n_buckets, len(volume_buckets) + 1):
         window = volume_buckets[i - n_buckets:i]
@@ -57,40 +82,30 @@ def compute_rolling_vpins(volume_buckets, n_buckets, bucket_size):
     return pd.DataFrame(vpins)
 
 
+def compute_vpin(df: pd.DataFrame, bucket_size: float, n_buckets: int = 50) -> pd.DataFrame:
+    """Compute rolling VPIN (Volume-Synchronised Probability of Informed Trading).
 
-def compute_vpin(df, bucket_size, n_buckets=50):
+    Implements the Easley et al. (2012) VPIN estimator: trades are aggregated
+    into equal-volume buckets and the rolling average absolute buy-sell
+    imbalance is computed as a fraction of total bucket volume.
+
+    Args:
+        df: DataFrame with columns [timestamp, price, qty, sign] where sign
+            is +1 for buys and -1 for sells.
+        bucket_size: Total volume (sum of qty) per bucket. Typically set to
+            1/50 of daily volume following Easley et al.
+        n_buckets: Number of buckets in the rolling VPIN window. Defaults to 50.
+
+    Returns:
+        DataFrame with columns [timestamp, vpin]. Timestamps correspond to the
+        last trade in each rolling window's final bucket.
     """
-    df: DataFrame with columns [timestamp, price, qty, sign]
-    bucket_size: total volume per bucket (in BTC)
-    n_buckets: rolling window length for VPIN average
-    
-    returns: DataFrame with columns [timestamp, vpin]
-    """
-    
-    # initialise a an array and put in subset of the trades with volumes adding up to bucket_size - store the v_b, v_s, timestamp
-    # if a single trade goes over 2 buckets then split it
     volume_buckets = build_volume_bucket(df, bucket_size)
 
-    # iterate through each bucket and compute the rolling VPIN over the n_buckets, using sliding window technnique
-     # formula is 1/n * sum of (V_B - V_S)/V
+    # formula is 1/n * sum of (V_B - V_S)/V
     rolling_vpins = compute_rolling_vpins(volume_buckets, n_buckets, bucket_size)
 
     return rolling_vpins
-  
-
-
-# total volume over the week
-# for asset in ASSETS:
-#   df1 = pd.read_parquet(f"data/processed/{asset}/week1.parquet")
-#   fixed_bucket_size = df1['qty'].sum() / 7 / 50
-#   print("Asset:", asset)
-#   for week in ['week1', 'week2', 'week3']:
-#       df = pd.read_parquet(f"data/processed/{asset}/{week}.parquet")
-#       result = compute_vpin(df, fixed_bucket_size, n_buckets=50)
-#       print(f"{week}: mean VPIN = {result['vpin'].mean():.4f}, "
-#             f"max VPIN = {result['vpin'].max():.4f}, "
-#             f"buckets = {len(result)}")
-
 
 
 # Session 6 Summary — VPIN Implementation
