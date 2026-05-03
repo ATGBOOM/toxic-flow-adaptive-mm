@@ -1,5 +1,13 @@
 # Toxic Order Flow Detection & Adaptive Market-Making
 
+**Research question:** Do equity microstructure tools — specifically VPIN-based toxic flow detection — transfer to anonymous, high-frequency crypto perpetual futures markets?
+
+**Key finding:** VPIN fails as a standalone toxicity detector (AUC 0.506, indistinguishable from random), with failure most pronounced in stress regimes where two-sided aggressive trading suppresses net order imbalance. A logistic classifier on trade intensity features achieves AP 0.294 vs VPIN baseline 0.177 on the stress week (bootstrap 95% CI: [0.287, 0.304] vs [0.171, 0.183]). An adaptive Avellaneda-Stoikov market maker using the classifier signal shows +$2,174 MtM improvement on BTC out-of-sample.
+
+![Key results figure](results/figures/key_results.png)
+
+---
+
 ## Purpose
 Implementing VPIN-based toxic order flow detection on crypto LOB data, extended with a 
 Bayesian classifier and adaptive market-making strategy. Framed as a methodological test 

@@ -1,0 +1,23 @@
+# Python 3.10+
+# Install: pip install -r requirements.txt
+
+# Core data
+pandas==3.0.2
+numpy==2.4.4
+pyarrow==23.0.1
+
+# Machine learning
+scikit-learn==1.8.0
+catboost==1.2.10
+joblib==1.5.3
+shap==0.51.0
+
+# Visualisation
+matplotlib==3.10.8
+seaborn==0.13.2
+
+# Notebooks
+jupyterlab==4.5.6
+
+# Testing
+pytest==9.0.3
