@@ -1,81 +1,79 @@
 # Toxic Order Flow Detection & Adaptive Market-Making
 
-**Research question:** Do equity microstructure tools — specifically VPIN-based toxic flow detection — transfer to anonymous, high-frequency crypto perpetual futures markets?
+**Research question:** Do equity microstructure tools — specifically VPIN-based toxic flow detection — transfer to anonymous, high-frequency cryptocurrency perpetual futures markets?
 
-**Key finding:** VPIN fails as a standalone toxicity detector (AUC 0.506, indistinguishable from random), with failure most pronounced in stress regimes where two-sided aggressive trading suppresses net order imbalance. A logistic classifier on trade intensity features achieves AP 0.294 vs VPIN baseline 0.177 on the stress week (bootstrap 95% CI: [0.287, 0.304] vs [0.171, 0.183]). An adaptive Avellaneda-Stoikov market maker using the classifier signal shows +$2,174 MtM improvement on BTC out-of-sample.
-
-![Key results figure](results/figures/key_results.png)
+**Key finding:** VPIN fails as a standalone toxicity detector at standard equity-market parameters (AUC 0.506, indistinguishable from random), with the failure driven by a structural mechanism: two-sided aggressive trading during corrections suppresses net order imbalance even when adverse selection is at its peak. A logistic classifier on trade intensity features achieves AP 0.294 vs VPIN baseline 0.177 on the stress regime (bootstrap 95% CI: [0.287, 0.304] vs [0.171, 0.183]). An adaptive Avellaneda-Stoikov market maker using the classifier signal shows directionally consistent MtM improvement across all six out-of-sample asset-week combinations, with the only statistically distinguishable result in the highest-toxicity cell (ETH stress: 95% CI [+$78, +$178]).
 
 ---
 
-## Purpose
-Implementing VPIN-based toxic order flow detection on crypto LOB data, extended with a 
-Bayesian classifier and adaptive market-making strategy. Framed as a methodological test 
-of whether equity microstructure patterns transfer to crypto venues. Not a trading bot.
+## Overview
+
+This project implements and critically evaluates a pipeline of equity market microstructure tools on cryptocurrency perpetual futures data from Bybit, across three assets (BTCUSDT, ETHUSDT, SOLUSDT) and three deliberately chosen market regimes. The framing is methodological — testing whether patterns documented in equity markets transfer to anonymous, high-frequency crypto venues — not a trading system.
+
+The pipeline covers: VPIN implementation from scratch following Easley et al. (2012), a supervised toxicity classifier with rigorous walk-forward evaluation, and an adaptive market-making strategy based on Avellaneda & Stoikov (2008) that uses the classifier signal to adjust quotes dynamically. Each component is evaluated against an analytical or statistical baseline, and failure modes are documented as carefully as successes.
 
 ## Papers
-- Easley, López de Prado, O'Hara (2012) — VPIN
-- Avellaneda & Stoikov (2008) — optimal market making
-- Cartea & Sánchez-Betancourt (2025) — analytical toxic flow adjustment
-- Cartea & Sánchez-Betancourt (2023) — PULSE feature set and evaluation framework
-- Bieganowski (2026) — crypto microstructure feature engineering
+
+- Easley, López de Prado, O'Hara (2012) — VPIN: volume-synchronised probability of informed trading
+- Avellaneda & Stoikov (2008) — optimal market making in a limit order book
+- Cartea & Sánchez-Betancourt (2025, arXiv:2503.18005) — analytical dealing strategy for toxic flow
+- Cartea & Sánchez-Betancourt (2023, arXiv:2312.05827) — PULSE: online Bayesian toxicity detection
+- Bieganowski (2026, arXiv:2602.00776) — explainable patterns in cryptocurrency microstructure
+- Muhle-Karbe, Ouazzani Chahdi, Rosenbaum & Szymanski (arXiv:2601.23172) — Hawkes process decomposition of informed flow
+
+## Repository Structure
+
+```
+toxic-flow-adaptive-mm/
+├── README.md
+├── ARCHITECTURE.md
+├── notebooks/
+│   ├── 01_eda.ipynb
+│   ├── 02_vpin_analysis.ipynb
+│   ├── 02_vpin_robustness.ipynb
+│   ├── 03_classifier_evaluation.ipynb
+│   └── 04_backtest_results.ipynb
+├── src/
+│   ├── data/                  # Data loading and pipeline
+│   ├── features/              # Feature engineering and LOB reconstruction
+│   ├── models/                # VPIN, classifier, market maker
+│   ├── backtest/              # Backtesting engine
+│   └── evaluations/           # Statistical evaluation tools
+├── configs/
+├── tests/
+└── results/
+```
 
 ## Data
 
-### Trade Data
-- **Source:** Bybit public data portal, USDT perpetual contracts
-- **Assets:** BTCUSDT, ETHUSDT, SOLUSDT
-- **Rationale for perps over spot:** Price discovery in crypto occurs primarily on the 
-  perpetual futures market. Informed traders concentrate here due to capital efficiency 
-  (leverage) and liquidity. Perp prices track spot within a few basis points via the 
-  funding rate mechanism.
+### Source and Assets
+Bybit public data portal, USDT perpetual contracts. Assets: BTCUSDT, ETHUSDT, SOLUSDT.
+
+Perpetual futures rather than spot: price discovery in crypto occurs primarily on the perpetual futures market. Informed traders concentrate here due to capital efficiency (leverage) and liquidity. Perp prices track spot within a few basis points via the funding rate mechanism.
 
 ### Order Book Data
-- **Source:** Bybit public data portal, USDT perpetual contracts (same venue as trades)
-- **Format:** JSON lines, incremental delta updates with periodic snapshots, 500 levels deep
-- **Reconstruction required:** Files contain ~2 snapshots and ~860k deltas per day. 
-  Full order book reconstruction (apply deltas sequentially onto initial snapshot) is 
-  needed to recover book state at any point in time. Implemented in Session 7.
+Bybit ob500 files: incremental delta updates with periodic snapshots, 500 levels deep, approximately 2 snapshots and 863k deltas per day per asset. Full reconstruction required — deltas are applied sequentially onto the initial snapshot, with book state carried across midnight boundaries. Features are extracted at each trade timestamp, ensuring alignment between book state and the prediction target.
 
 ### Regime Weeks
-Three deliberately chosen weeks across distinct market conditions:
+
+Three weeks selected for regime variation rather than randomly. Findings should not be generalised as representative of typical market conditions.
 
 | Week | Dates | Regime | BTC Price |
 |------|-------|--------|-----------|
-| 1 | Sep 9-15 2024 | Low volatility consolidation | ~$55k |
-| 2 | Oct 28 - Nov 3 2024 | Directional breakout | above $70k |
-| 3 | Feb 24 - Mar 2 2025 | Stress/correction | from $100k+ highs |
+| 1 | Sep 9–15 2024 | Low volatility consolidation | ~$55k |
+| 2 | Oct 28 – Nov 3 2024 | Directional breakout (post US election) | above $70k |
+| 3 | Feb 24 – Mar 2 2025 | Stress / correction | from $100k+ highs |
 
-**Why three regimes:** To test whether toxicity patterns and classifier performance are 
-regime-dependent, rather than fitting to one market condition.
+**Missing data:** ETH week 3 has orderbook files for 4 of 7 days (Feb 28, Mar 1–2 unavailable). SOL week 3 is missing Feb 24. Results for truncated weeks are flagged throughout.
 
-**Sampling bias caveat:** These weeks were selected for regime variation, not randomly. 
-Findings should not be generalised as representative of typical market conditions.
+---
 
-## Pipeline
+## EDA Findings
 
-### Trade Data
-Raw CSV.gz → typed DataFrame (Unix timestamp in seconds, direction as +1/-1 sign, 
-gap detection) → parquet. One file per asset per week.
+### Sampling frequency dominates distributional statistics
+Tick-level return statistics are dominated by microstructure artefacts. Kurtosis drops from ~10,000 at tick level to 5–10 at 1-minute bars. This directly motivates the volume clock in VPIN: time-based sampling produces statistics that reflect trade arrival rates more than genuine price dynamics.
 
-### Order Book Data
-Raw JSON lines → order book reconstruction (snapshot initialisation + sequential delta 
-application) → feature extraction at each trade timestamp → parquet. Book state is 
-carried across midnight boundaries for continuity. Processing time: ~100s per asset-day.
-
-### Feature Matrix
-Book features + trade features + VPIN + toxicity label merged into a single parquet 
-per asset-week. One row per trade, ~20 feature columns plus label.
-
-## EDA Findings (Session 5)
-
-### 1. Sampling frequency dominates distributional statistics
-Tick-level return statistics are dominated by microstructure artefacts. Kurtosis drops 
-from ~10,000 at tick level to 5-10 at 1-minute bars — the correct range for analysis. 
-This directly motivates the volume clock in VPIN: time-based sampling produces statistics 
-that reflect trade arrival rates more than genuine price dynamics.
-
-### 2. OFI signal decays at dramatically different rates across regimes
+### OFI signal decays at dramatically different rates across regimes
 
 | | Raw OFI 10s | Raw OFI 1min | Decay ratio |
 |--|--|--|--|
@@ -83,94 +81,49 @@ that reflect trade arrival rates more than genuine price dynamics.
 | Week 2 (breakout) | 0.045 | 0.006 | 8x |
 | Week 3 (stress) | 0.017 | 0.015 | 1x |
 
-Week 3 shows persistent OFI — the signal survives temporal aggregation, consistent with 
-sustained directional selling pressure. Week 1 shows fast decay, consistent with noise 
-trading that rapidly reverses.
+Week 3 shows persistent OFI — the signal survives temporal aggregation, consistent with sustained directional selling pressure. Week 1 shows fast decay consistent with noise trading. All correlations are small (max 0.085), motivating the richer feature set in the classifier.
 
-### 3. Normalisation sharpens signal at short frequencies, hurts at long
-Volume-normalised OFI outperforms raw OFI at 10-second bars. At 1-minute bars 
-normalisation adds noise. All correlations are small (max 0.085) — OFI alone is a weak 
-predictor, motivating the richer feature set in Phase 3.
+---
 
-## VPIN Results (Session 6)
+## VPIN
 
 ### Implementation
-VPIN implemented from scratch following Easley et al. (2012). Bucket size = 1/50 of 
-daily volume (~2376 BTC for BTC week 1), producing ~300 buckets per week. Trade 
-splitting implemented correctly for trades straddling bucket boundaries.
+VPIN implemented from scratch following Easley et al. (2012). Bucket size = 1/50 of daily volume (~2,376 BTC for BTC week 1), producing ~300 buckets per week. Trade splitting is implemented correctly for trades straddling bucket boundaries.
 
-### Cross-Regime Results (fixed bucket size = 2376 BTC)
+### Cross-Regime Results
 
-| Asset | Week 1 (consolidation) | Week 2 (breakout) | Week 3 (correction) |
-|-------|----------------------|-------------------|---------------------|
+| Asset | Week 1 (consolidation) | Week 2 (breakout) | Week 3 (stress) |
+|-------|----------------------|-------------------|-----------------|
 | BTCUSDT | 0.162 | 0.171 | 0.149 |
 | ETHUSDT | 0.175 | 0.194 | 0.186 |
 | SOLUSDT | 0.164 | 0.166 | 0.155 |
 
-### Key Finding — VPIN Fails in Volatility Regimes
-Week 3 (the most volatile regime) has the lowest mean VPIN for BTC and SOL. In a 
-correction, aggressive sellers and opportunistic buyers are simultaneously active — 
-high volume on both sides produces low net imbalance. VPIN detects directional informed 
-trading well but fails when both sides react simultaneously. This is a genuine limitation 
-of the metric, not a data artefact.
+Mean VPIN is lowest in the stress regime for BTC and SOL — the opposite of what a toxicity metric should show. AUC against the toxic label at standard parameters (V=1/50, n=50): 0.506 across all test periods, indistinguishable from random. Correlation between VPIN and absolute 30-minute forward return on BTC week 2: 0.145 — the baseline the classifier must exceed.
 
-### Validation
-Correlation between VPIN and absolute 30-minute forward return (BTC week 2): **0.145**. 
-This is the baseline benchmark the classifier must exceed.
+### Why VPIN Fails in Stress Regimes
 
-### VPIN Limitations
-1. Bucket size sensitivity — choice of 1/50 daily volume is principled but arbitrary
-2. Cross-asset comparison unreliable due to different volume scales
-3. Fails to detect toxicity in two-sided volatile regimes
-4. Lagging signal by construction — summarises past n buckets
+During a correction, informed sellers and opportunistic buyers are simultaneously active. High volume on both sides produces low net order imbalance even when adverse selection is at its peak. VPIN measures directional imbalance — it detects informed trading that is one-sided. In a crash, it is blind to the two-sided informed activity that characterises the regime.
 
-## Feature Engineering & Toxicity Labelling (Session 7)
+This is not a parameter artefact. VPIN was re-run across a grid of bucket sizes V ∈ {1/100, 1/50, 1/25, 1/10} of average daily volume and rolling windows n ∈ {20, 50, 100, 250} (144 evaluations total):
 
-### Order Book Reconstruction
-Bybit ob500 files contain ~2 snapshots and ~863k delta updates per day per asset. 
-Reconstruction streams through the file maintaining a running book state (two 
-dictionaries: price → size for bids and asks). For each delta, levels with size > 0 
-are updated; levels with size = 0 are deleted. Book state carries across midnight 
-boundaries between consecutive days.
+| Regime | AUC range (valid cells) | Mean AUC |
+|--------|------------------------|----------|
+| Consolidation | [0.465, 0.570] | 0.519 |
+| Breakout | [0.427, 0.598] | 0.499 |
+| Stress | [0.470, 0.614] | 0.553 |
 
-Features are extracted at each trade timestamp (Option B sampling — "what did the book 
-look like when this trade arrived?"), producing one feature row per trade. This ensures 
-perfect alignment between features and the prediction target.
+At standard parameters (V=1/50, n=50) the failure is consistent across all assets and regimes. At small rolling windows (n=20) VPIN partially recovers signal in the stress regime — BTC stress reaches AUC 0.615 at (V=1/50, n=20), SOL stress reaches 0.614 at (V=1/10, n=20). The mechanism is that a shorter window is less likely to average together the opposing flow that cancels the signal. The classifier's advantage over VPIN holds at the parameter settings used in the equity microstructure literature, which is the relevant comparison.
 
-### Book-Derived Features
-- **Spread:** best ask − best bid. Median = $0.10 (minimum tick) for BTC, max = $31.70 
-  during momentary dislocations. BTC sits at the tightest possible spread most of the time.
-- **Microprice:** size-weighted midpoint = (best_bid × ask_size + best_ask × bid_size) / 
-  (bid_size + ask_size). Better estimate of fair value than simple midpoint.
-- **Depth imbalance at levels 1, 5, 10, 25:** 
-  (bid_volume_top_N − ask_volume_top_N) / (bid_volume_top_N + ask_volume_top_N). 
-  Ranges from −1 (all volume on ask side) to +1 (all volume on bid side).
-- **Bid/ask pressure:** volume concentration in top 5 levels relative to top 25. 
-  High pressure = volume concentrated near best price, ready to absorb incoming trades.
-- **Pressure imbalance:** bid_pressure − ask_pressure.
+†ETH week3 bucket sizes are derived from a 4-day average daily volume and are larger than a full-week figure would produce. Results for this cell should be interpreted with this caveat.
 
-### Trade-Derived Features
-- **Trade intensity (1s, 5s, 10s windows):** rolling count of trades using searchsorted 
-  on timestamp arrays. No loops — O(n log n) via binary search.
-- **Volume acceleration:** volume in last 5s / (volume in last 30s × 5/30). Values > 1.0 
-  mean trading is speeding up. Computed via cumulative sums + searchsorted.
-- **Signed volume imbalance (10s):** sum of sign × qty in last 10 seconds. Measures net 
-  directional pressure. Computed via cumulative sums of signed volume.
-- **VPIN:** forward-filled from Session 6 bucket-level computation onto trade timestamps 
-  using searchsorted. ~1.6M trades per week in warmup period before first VPIN value.
+---
+
+## Feature Engineering & Toxicity Labelling
 
 ### Toxicity Definition
+A trade is toxic if the price moves adversely by more than 8 bps within 10 seconds in the direction of the trade. Buy is toxic if price rises >8 bps; sell is toxic if price falls >8 bps.
 
-**Label:** A trade is toxic if the price moves adversely by more than 8 bps within 10 
-seconds in the direction of the trade. Buy is toxic if price rises > 8 bps; sell is 
-toxic if price falls > 8 bps.
-
-**Parameter selection (data-driven):**
-- **Horizon (Y = 10 seconds):** Long enough for informed trades to show impact, short 
-  enough to measure the trade's effect rather than background drift. Consistent with 
-  Cartea & Sánchez-Betancourt (2023).
-- **Threshold (X = 8 bps):** Chosen from empirical distribution of absolute 10-second 
-  forward returns on BTC Sep 9:
+**Parameter justification:** 10 seconds is long enough for informed trades to show impact, short enough to measure the trade's effect rather than background drift — consistent with Cartea & Sánchez-Betancourt (2023). 8 bps ≈ 90th percentile of absolute 10-second forward returns on BTC (empirical distribution below). Directional filtering reduces the label rate from ~10% to ~5.5%.
 
 | Percentile | Absolute 10s forward return (bps) |
 |------------|-----------------------------------|
@@ -180,14 +133,7 @@ toxic if price falls > 8 bps.
 | 95th | 11.11 |
 | 99th | 30.50 |
 
-8 bps ≈ 90th percentile of absolute moves. Directional filtering (requiring the move 
-to match trade sign) reduces the label rate from ~10% to ~5.5%, as expected.
-
-**Tradeoff reasoning:** Threshold too small → flags normal market noise, hurting precision. 
-Threshold too large → misses real toxic trades, hurting recall. 90th percentile balances 
-selectivity with sufficient positive examples for classifier training.
-
-### Toxic Rate by Regime — Key Finding
+### Toxic Rate by Regime
 
 | Asset | Week 1 (consolidation) | Week 2 (breakout) | Week 3 (stress) |
 |-------|----------------------|-------------------|-----------------|
@@ -195,26 +141,22 @@ selectivity with sufficient positive examples for classifier training.
 | ETHUSDT | 7.0% | 5.7% | **16.8%** |
 | SOLUSDT | 6.7% | 6.9% | **23.4%** |
 
-**Finding 1 — Stress regimes have 3-4x higher toxic rates.** During corrections, informed 
-traders (or faster-reacting traders) dominate flow. This is consistent with microstructure 
-theory: adverse selection intensifies during high-uncertainty periods.
-
-**Finding 2 — Less liquid assets are more vulnerable.** SOL at 23.4% toxic rate during 
-stress vs BTC at 14.1%. Less uninformed flow to dilute the informed signal.
-
-**Finding 3 — VPIN contradicts toxic rate in stress regimes.** VPIN was lowest in week 3 
-(Session 6) but toxic rate was highest. VPIN measures net imbalance; toxicity measures 
-adverse price impact. In a crash, both sides trade aggressively (low VPIN) but the 
-informed side consistently wins (high toxicity). This is the strongest argument for a 
-richer classifier over VPIN alone.
+Stress regimes show 3–4x higher toxic rates. Less liquid assets are more vulnerable — SOL at 23.4% vs BTC at 14.1% during the correction. VPIN was lowest in week 3 but toxic rate was highest: the strongest argument for a richer classifier.
 
 ### Toxic Trade Clustering
-99.2% of toxic trades are within 1 second of another toxic trade. Median gap = 0.0s. 
-Toxic trades arrive in rapid bursts — consistent with informed agents executing 
-aggressively over short windows. Implication: the classifier is really predicting 
-"toxic episodes" rather than individual toxic trades.
+99.2% of toxic trades arrive within 1 second of another toxic trade (median inter-arrival gap = 0.0s). This clustering is consistent with self-exciting point process dynamics: each toxic event increases the short-term arrival rate of subsequent toxic events, producing the burst structure observed in the data. This is the Hawkes process formalism for trade arrival in microstructure (Muhle-Karbe et al., arXiv:2601.23172, for the core/reaction flow decomposition).
 
-### Feature-Toxicity Signal Strength (BTC Sep 9)
+An important identification caveat: self-excitation (a single informed agent's order splitting creating sequential toxic trades) and genuine co-ordinated informed activity (multiple independent agents reacting to the same signal) are observationally equivalent in the public Bybit feed, which provides no participant identifiers. The clustering observation is robust; its interpretation as multi-agent informed activity is not.
+
+Implication for the classifier: it is predicting toxic episodes rather than individual toxic trades.
+
+### Features
+
+**Book-derived:** spread, microprice, depth imbalance at levels 1/5/10/25, bid/ask pressure, pressure imbalance.
+
+**Trade-derived:** trade intensity at 1s/5s/10s windows (rolling count via searchsorted, O(n log n)), volume acceleration, signed volume imbalance over 10s, VPIN (forward-filled from bucket computation).
+
+**Feature-toxicity signal strength (BTC consolidation week):**
 
 | Feature | Toxic mean | Non-toxic mean | Ratio |
 |---------|-----------|---------------|-------|
@@ -225,262 +167,185 @@ aggressively over short windows. Implication: the classifier is really predictin
 | Volume acceleration | 1.98 | 1.69 | 1.2x |
 | Pressure imbalance | 0.000 | 0.006 | ~0x |
 
-**Strongest signals:** Signed volume imbalance, trade intensity, and depth imbalance — 
-all trade-flow features rather than deep book structure. Spread is useful (market makers 
-already widen during toxic episodes). Volume acceleration and pressure imbalance show 
-minimal signal.
+Trade-flow features dominate. Deep book structure (pressure imbalance) shows minimal signal.
 
-### Missing Data
-- ETH week 3: missing Feb 28, Mar 1-2 orderbook files (4 of 7 days available)
-- SOL week 3: missing Feb 24 orderbook file (6 of 7 days available)
-- Not critical for classifier training — sufficient data across other asset-weeks.
+---
 
-## Classifier Results (Session 8)
+## Classifier
 
-### Design Decisions
-See `docs/CLASSIFIER_DESIGN.md` for full rationale on each decision.
+### Design
 
-**Feature engineering at load time (3 new features):**
-- `spread_bps` = spread / midprice × 10000 (cross-asset comparable)
-- `microprice_minus_mid` = microprice − midprice (book asymmetry without raw price level)
-- `qty_normalised` = qty / rolling 1000-trade mean (relative trade size, cross-asset comparable)
+Three new features engineered at load time for cross-asset comparability: `spread_bps` (spread / midprice × 10000), `microprice_minus_mid` (book asymmetry without raw price level), `qty_normalised` (qty / rolling 1000-trade mean).
 
-**Excluded columns:**
-- `sign` — excluded to enforce direction symmetry; toxicity should be symmetric in theory
-- `price`, `midprice`, `microprice` — raw price levels meaningless across assets/time
-- `fwd_10s_bps` — forward-looking return used to compute label; including it is pure leakage
-- `qty` — replaced by normalised version; raw qty conflates asset identity with trade size
+Excluded: `sign` (direction symmetry enforced), raw price levels (meaningless cross-asset), `fwd_10s_bps` (leakage — used to compute the label), raw `qty` (replaced by normalised version).
 
-**Final feature set (16 features):** spread_bps, microprice_minus_mid, qty_normalised, 
-depth_imbalance_1/5/10/25, bid_pressure, ask_pressure, pressure_imbalance, 
-trade_intensity_1s/5s/10s, volume_acceleration, signed_vol_imbalance_10s, vpin.
+**Final feature set (16 features):** spread_bps, microprice_minus_mid, qty_normalised, depth_imbalance_1/5/10/25, bid_pressure, ask_pressure, pressure_imbalance, trade_intensity_1s/5s/10s, volume_acceleration, signed_vol_imbalance_10s, vpin.
 
-**Training splits:**
-- Split 1: Train week 1 → test weeks 2 and 3 separately
-- Split 2: Train weeks 1+2 → test week 3
-- Subsampling: 500k stratified random from training weeks, full test sets
-
-**Models:** VPIN-only baseline (threshold classifier), logistic regression, CatBoost (gradient boosted trees)
+**Walk-forward validation only.** Random splits are invalid for time series — they leak future microstructure state into training. Two splits: train week 1 → test weeks 2 and 3; train weeks 1+2 → test week 3. Subsampling: 500k stratified random from training weeks, full test sets.
 
 ### Results
 
-#### Split 1: Train week 1 → Test week 2 (similar regime)
+#### Train week 1 → Test week 2 (similar regime)
 
 | Model | AP | AUC | Brier |
 |-------|------|------|-------|
 | VPIN baseline | 0.055 | 0.506 | 0.065 |
 | Logistic regression | 0.070 | 0.593 | 0.052 |
-| CatBoost (balanced) | 0.095 | 0.673 | 0.144 |
+| CatBoost | 0.095 | 0.673 | 0.144 |
 
-#### Split 1: Train week 1 → Test week 3 (stress regime, out-of-distribution)
+#### Train week 1 → Test week 3 (stress, out-of-distribution)
 
 | Model | AP | AUC | Brier |
 |-------|------|------|-------|
 | VPIN baseline | 0.177 | 0.507 | 0.148 |
 | Logistic regression | 0.281 | 0.650 | 0.155 |
-| CatBoost (balanced) | 0.242 | 0.616 | 0.176 |
+| CatBoost | 0.242 | 0.616 | 0.176 |
 
-#### Split 2: Train weeks 1+2 → Test week 3
+#### Train weeks 1+2 → Test week 3
 
 | Model | AP | AUC | Brier |
 |-------|------|------|-------|
 | VPIN baseline | 0.177 | 0.507 | 0.148 |
 | Logistic regression | 0.294 | 0.664 | 0.155 |
-| CatBoost (balanced) | 0.244 | 0.600 | 0.266 |
+| CatBoost | 0.244 | 0.600 | 0.266 |
 
 ### Key Findings
 
-**Finding 1 — VPIN is no better than random as a standalone classifier.** AUC of 0.506 
-across all tests (0.5 = random). AP matches base rate exactly. VPIN cannot rank which 
-trades are toxic. This quantitatively confirms the Session 6 observation that VPIN fails 
-in two-sided volatile regimes.
+**VPIN is no better than random as a standalone classifier.** AUC 0.506 across all tests. SHAP analysis confirms this: VPIN mean SHAP = 0.008, near-zero once trade intensity and book features are included. The metric that fails as a standalone predictor is also redundant within a richer feature set.
 
-**Finding 2 — Logistic regression outperforms CatBoost on out-of-distribution data.** 
-On week 2 (similar regime to training), CatBoost wins: AP 0.095 vs 0.070. On week 3 
-(stress, OOD), logistic regression wins: AP 0.281 vs 0.242. CatBoost overfits to 
-training-regime patterns that don't transfer. Classic bias-variance tradeoff in action.
+**Logistic regression outperforms CatBoost on out-of-distribution data.** On week 2 (similar regime to training), CatBoost wins: AP 0.095 vs 0.070. On week 3 (stress, OOD), logistic regression wins: AP 0.281 vs 0.242. CatBoost overfits to calm-regime patterns that do not transfer — classic bias-variance tradeoff. More training data makes this worse: at 2M rows, CatBoost AP on OOD week 3 drops to 0.181 vs 0.248 at 500k, as richer exposure to calm-regime patterns makes the model more confidently wrong under stress.
 
-**Finding 3 — CatBoost is badly miscalibrated.** Brier scores of 0.144-0.266 compared 
-to logreg's 0.052-0.155. The `auto_class_weights='Balanced'` parameter inflates 
-predicted probabilities. The model's rankings may be reasonable but its probability 
-estimates are not trustworthy.
+**Trade intensity is the dominant predictor.** Logistic regression standardised coefficients: trade_intensity_10s (+0.48), trade_intensity_5s (−0.36), volume_acceleration (+0.18). SHAP values (GBT): trade_intensity_10s (0.319), trade_intensity_5s (0.181), volume_acceleration (0.055). Informed traders are detectable by their urgency — the temporal pattern of execution — not their footprint in the order book. This is consistent with microstructure intuitions about fleeting orders and order-to-trade ratios.
 
-**Finding 4 — Adding breakout data to training marginally helps.** Split 2 logreg 
-(trained on weeks 1+2) gets AP 0.294 vs Split 1's 0.281 on week 3. CatBoost barely 
-changes (0.244 vs 0.242). More regime diversity helps the simple model slightly.
+**Both models are underconfident.** Predicted probabilities are systematically lower than true toxic rates, with miscalibration worsening at higher predicted probabilities — precisely where accurate estimates matter most for spread adjustment. The classifier is best calibrated in the low-toxicity regime where intervention is not needed, and least calibrated in the high-toxicity regime where accurate probability estimates matter most.
 
-**Finding 5 — Trade intensity dominates feature importance.** Logistic regression 
-coefficients (standardised):
-- trade_intensity_10s: +0.48 (strongest by far)
-- trade_intensity_5s: −0.36 (together with 10s, captures burst shape)
-- volume_acceleration: +0.18
-- ask/bid_pressure: −0.13/−0.10 (thin books → more toxic)
-- vpin: +0.04 (barely matters once other features are present)
+**Neither model beats the trivial predictor on Brier score.** Both score above the baseline Brier of 0.1454 (always predicting the base rate), reflecting near-zero resolution: the model rarely varies its output, so bin-level actual rates barely deviate from the overall base rate.
 
-### Investigation Results (Session 8 continued)
+### Precision-Recall at Operationally Relevant Thresholds (test week 3)
 
-**Investigation 1 — Class weighting:** Unbalanced CatBoost chosen. Balanced weights 
-inflate predicted probabilities above true base rate, destroying calibration (Brier 0.144 
-vs 0.051) with no improvement in AP. For a threshold-based strategy, miscalibrated 
-probabilities make thresholds meaningless.
-
-**Investigation 2 — Training data size:** 2M vs 500k rows shows no improvement (AP 
-0.089 vs 0.093 on similar regime). Model is feature-limited not data-limited. On OOD 
-week 3, more data hurts (AP 0.181 vs 0.248) — richer exposure to calm-regime patterns 
-makes the model more confidently wrong under stress.
-
-**Investigation 3 — Asset indicator:** Adding asset_id as a feature produces no 
-meaningful change (AP difference <0.002 across all splits). Microstructure features 
-are sufficient statistics for per-asset risk characteristics — the model learns 
-"SOL-like behaviour" from trade intensity and imbalance without needing the asset label.
-
-**Investigation 4 — Operating threshold:** Breakeven toxicity probability for market 
-maker = S/(S+L) = 5/(5+8) = 0.38. Best classifier precision = 0.30 at t=0.20 on week 3. 
-Classifier does not clear breakeven for a binary pull-quotes decision. Recommended use: 
-continuous spread widening proportional to p_toxic rather than binary on/off.
-
-### Final Classifier Choice
-Unbalanced CatBoost, trained on weeks 1+2, 500k stratified subsample. Used for 
-adaptive market-making with continuous spread adjustment, not binary quote pulling.
-
-## Rigorous Evaluation (Session 9)
-
-### Calibration — Reliability Diagrams
-
-Both logistic regression and GBT are **underconfident**: predicted probabilities are 
-systematically lower than the true toxic rate in each bin. The miscalibration worsens 
-at higher predicted probabilities — precisely where accurate estimates matter most for 
-spread adjustment decisions. For logistic regression, the calibration is close to the 
-diagonal at low predicted probabilities but diverges substantially at higher values. 
-For GBT, the gap between predicted and actual rate is roughly uniform across all 
-probability levels.
-
-**Implication for market-making:** Underconfidence means the model predicts lower toxicity 
-than actually exists. A spread-widening strategy scaled to p_toxic will systematically 
-under-widen, leaving the market maker exposed to more adverse selection than the signal 
-suggests. This is unrecognised risk — worse than overconfidence, which would merely cost 
-revenue from unnecessary spread widening.
-
-**Key limitation:** The classifier is best calibrated in the low-toxicity regime where 
-intervention is not needed, and least calibrated in the high-toxicity regime where 
-accurate probability estimates matter most.
-
-### Brier Score Decomposition
-
-| Model | Reliability | Resolution | Uncertainty | Brier | Baseline |
-|-------|-------------|------------|-------------|-------|----------|
-| Logistic regression | 0.0140 | 0.0034 | 0.1454 | 0.1560 | 0.1454 |
-| GBT | 0.0075 | 0.0032 | 0.1454 | 0.1498 | 0.1454 |
-
-Both models score above the baseline Brier of 0.1454 (always predicting the base rate), 
-meaning neither beats the trivial predictor on this metric. GBT is better calibrated 
-(reliability 0.0075 vs 0.0140) but resolution is near-identical and very low for both — 
-neither model discriminates strongly between toxic and non-toxic trades. The low 
-resolution directly reflects that almost all predictions cluster near zero: the model 
-rarely varies its output, so bin-level actual rates barely deviate from the overall base rate.
-
-**Root cause:** The feature set captures aggregate microstructure state but cannot resolve 
-individual trade identity. Any single trade arriving during a high-intensity burst may or 
-may not be toxic — the features are informative at the population level but noisy at the 
-individual prediction level.
-
-### Precision-Recall Threshold Analysis
+Market maker breakeven precision = S/(S+L) = 5/(5+8) = **0.38**.
 
 **Logistic Regression**
 
 | Threshold | Precision | Recall | FPR | Intervention Rate |
 |-----------|-----------|--------|-----|-------------------|
-| 0.10 | 0.383 | 0.159 | 0.055 | 0.073 |
-| 0.15 | 0.403 | 0.066 | 0.021 | 0.029 |
-| 0.20 | 0.416 | 0.036 | 0.011 | 0.015 |
-| 0.25 | 0.432 | 0.023 | 0.006 | 0.009 |
-| 0.30 | 0.421 | 0.015 | 0.004 | 0.006 |
+| 0.10 | 0.383 | 0.159 | 0.055 | 7.3% |
+| 0.15 | 0.403 | 0.066 | 0.021 | 2.9% |
+| 0.20 | 0.416 | 0.036 | 0.011 | 1.5% |
+
+Logistic regression clears the breakeven precision bar at all thresholds but recall is below 16% even at T=0.10. The classifier identifies a statistically detectable subset of toxic flow but leaves the market maker exposed to over 84% of adverse fills.
 
 **GBT**
 
 | Threshold | Precision | Recall | FPR | Intervention Rate |
 |-----------|-----------|--------|-----|-------------------|
-| 0.10 | 0.245 | 0.543 | 0.359 | 0.391 |
-| 0.15 | 0.286 | 0.255 | 0.136 | 0.157 |
-| 0.20 | 0.300 | 0.082 | 0.041 | 0.049 |
-| 0.25 | 0.283 | 0.023 | 0.012 | 0.014 |
-| 0.30 | 0.270 | 0.009 | 0.005 | 0.006 |
+| 0.10 | 0.245 | 0.543 | 0.359 | 39.1% |
+| 0.20 | 0.300 | 0.082 | 0.041 | 4.9% |
 
-**Market maker breakeven precision = 0.38.** Logistic regression clears this bar at all 
-thresholds shown. GBT never clears it.
+GBT never clears the breakeven precision bar. At T=0.10, recall is 0.543 but FPR is 0.359 — flagging 39% of all trades as potentially toxic. Operationally unworkable.
 
-**Key finding:** While logistic regression achieves precision above the market maker's 
-breakeven at all tested thresholds, recall remains below 16% even at the lowest threshold. 
-The classifier identifies a statistically detectable subset of toxic flow but leaves the 
-market maker exposed to over 84% of adverse fills, limiting its practical value as a 
-standalone quote-adjustment signal.
+**Recommended use:** continuous spread widening proportional to p_toxic rather than binary quote pulling. The classifier does not clear breakeven for a binary decision but has consistent directional value as a continuous signal.
 
-**GBT tradeoff:** At T=0.10, GBT achieves recall of 0.543 but FPR of 0.359 — flagging 
-39% of all trades as potentially toxic. This intervention rate is operationally 
-unworkable and would alienate the uninformed flow that provides market-making revenue.
-
-### SHAP Feature Importance (GBT)
-
-Mean SHAP values (log-odds space), all features:
-
-| Feature | Mean SHAP | Interpretation |
-|---------|-----------|----------------|
-| trade_intensity_10s | 0.319 | Dominant predictor |
-| trade_intensity_5s | 0.181 | Burst persistence signal |
-| volume_acceleration | 0.055 | Accelerating activity |
-| trade_intensity_1s | 0.047 | Immediate burst onset |
-| ask_pressure | 0.043 | Book thinning |
-| spread_bps | 0.035 | Stress regime marker |
-| vpin | 0.008 | Near-zero contribution |
-
-**Trade intensity across all three windows (1s, 5s, 10s) is the dominant predictor**, 
-with mean SHAP of 0.319 for the 10-second window. This is consistent with the 
-microstructure intuition that informed traders exhibit urgency — executing rapidly before 
-their signal decays — whereas uninformed liquidity traders arrive closer to a random 
-Poisson process. GBT learns the temporal shape of intensity bursts across all three 
-windows simultaneously, capturing whether a spike at 1s persists through 5s and 10s — 
-an interaction logistic regression cannot model.
-
-**Spread_bps shows a positive mean SHAP of 0.035**, associating wider spreads with higher 
-predicted toxicity. While this appears to contradict the standard microstructure intuition 
-that tight spreads attract informed flow, it likely reflects a regime-specific correlation: 
-in the week 3 stress period, spread widening co-occurs with volatile bursts during which 
-informed activity is highest, and the model learns this correlation rather than the general 
-principle. This may not generalise beyond the stress regime.
-
-**VPIN contributes near-zero mean SHAP of 0.008**, confirming the Session 6 finding 
-quantitatively: once trade intensity and order book features are included, VPIN adds no 
-incremental discriminative power. The two-sided volatile regime that breaks VPIN as a 
-standalone metric also renders it redundant within a richer feature set.
-
-### Bootstrap Confidence Intervals on AP
-
-Bootstrapped on 50,000-trade subsample, 1,000 iterations:
+### Bootstrap Confidence Intervals on AP (week 3, 1000 iterations)
 
 | Model | Mean AP | 95% CI |
 |-------|---------|--------|
 | Logistic regression | 0.295 | [0.287, 0.304] |
 | GBT | 0.249 | [0.243, 0.256] |
 
-Confidence intervals do not overlap. The logistic regression outperformance on the week 3 
-stress regime is statistically robust, not a sampling artefact. The gap of ~0.046 AP points 
-is consistent across bootstrap resamples.
+Confidence intervals do not overlap. The logistic regression outperformance on the stress regime is statistically robust, not a sampling artefact.
 
-### Overall Evaluation Conclusion
+---
 
-Across all four evaluation frameworks, the classifier tells a consistent story: both models 
-systematically underestimate toxicity probability, achieve discrimination below the base 
-rate benchmark on Brier score, and capture at most 16% of toxic flow at operationally 
-viable precision thresholds.
+## Adaptive Market-Making
 
-The signal is statistically detectable — logistic regression AP of 0.295 vs VPIN baseline 
-of 0.177, with non-overlapping bootstrap CIs confirming the gap is real. But it is 
-insufficient for standalone deployment. The fundamental constraint is the resolution of 
-publicly available trade data: without millisecond-level queue position, order-to-trade 
-ratios, or participant identifiers, individual trade toxicity cannot be resolved with 
-high confidence.
+### Strategy
 
-This finding motivates the analytical approach in Session 10: rather than classifying 
-individual trades, the Cartea & Sánchez-Betancourt (2025) framework derives an optimal 
-price adjustment that accounts for the aggregate probability of informed flow — sidestepping 
-the individual classification problem entirely.
+**Baseline:** Avellaneda-Stoikov (2008) infinite-horizon market maker with inventory skew. At high fill frequency on BTC perps (κ ≈ 19 trades/bar), the A-S spread formula collapses to one minimum tick ($0.10) and becomes independent of γ. Inventory control operates entirely through reservation price skew.
+
+**Adaptive extension:** spread widens proportionally to per-bar classifier toxicity rate:
+
+```
+adaptive_spread = market_spread × (1 + k × toxic_rate)
+```
+
+k=5 calibrated on BTC week 1 (in-sample). Applied unchanged to weeks 2 and 3. Fill size derived from a risk budget:
+
+```
+fill_size = α × market_spread / (σ × mid)    [α = 0.5]
+```
+
+**Why Cartea & Sánchez-Betancourt (2025) does not transfer:** their closed-form price adjustment assumes the broker can identify informed and uninformed clients by name and stream bespoke quotes to each. Crypto order flow is anonymous by construction — there is no mechanism to separate client streams, rendering the signal extraction and optimal discount derivation inoperable. The anonymous venue structure is a hard constraint, not a data limitation.
+
+### Out-of-Sample Results
+
+k calibrated on week 1 only. Weeks 2 and 3 are strictly out-of-sample.
+
+| Asset | Week | Baseline MtM ($) | Adaptive MtM ($) | Improvement ($) | 95% CI | Toxic Fill Rate — Base | Toxic Fill Rate — Adaptive | Avg Spread Ratio |
+|-------|------|-----------------|-----------------|-----------------|--------|----------------------|--------------------------|-----------------|
+| BTC | week2 | -4,726 | -4,271 | +455 | [-5,155, +2,376] | 1.1% | 0.5% | 1.044 |
+| BTC | week3 | +349 | +2,339 | +1,991 | [-2,149, +7,002] | 6.2% | 4.2% | 1.209 |
+| ETH | week2 | -368 | -87 | +280 | [-1,182, +542] | 3.2% | 2.5% | 1.098 |
+| ETH | week3 | -107 | +12 | +118 | [+78, +178] | 12.6% | 11.1% | 1.402 |
+| SOL | week2 | -34 | +52 | +86 | [-152, +344] | 5.3% | 2.5% | 1.156 |
+| SOL | week3 | -35 | +52 | +87 | [-432, +487] | 16.2% | 13.7% | 1.628 |
+
+CIs computed via block bootstrap (B=200, daily blocks, percentile method). ~4–7 daily blocks per week — the evaluation is genuinely underpowered.
+
+### Key Findings
+
+All six out-of-sample cells show positive improvement. Five of six CIs span zero, reflecting ~7 daily bootstrap blocks per week — the evaluation cannot distinguish signal from noise at this data volume. The honest claim is directional, not conclusive.
+
+**ETH week 3 is the only statistically distinguishable result.** CI [+$78, +$178] lies entirely above zero despite only 4 daily blocks. ETH week 3 is the stress/correction regime with 12.6% baseline toxic fill rate and average spread ratio of 1.40 — the highest-toxicity cell in the evaluation. The signal has most value precisely when informed flow is most concentrated.
+
+**The adaptive strategy consistently reduces toxic fill rate in every cell.** The mechanism is working: wider spreads on toxic bars prevent fills at adverse prices. The largest reduction is in the highest-toxicity cells (SOL week 3: 16.2% → 13.7%).
+
+**BTC dollar improvements are larger in absolute terms due to notional, not signal strength.** BTC week 3 (+$1,991) reflects larger fill sizes at higher prices, not a stronger classifier signal. SOL and ETH show comparable percentage improvements.
+
+---
+
+## Limitations
+
+**The evaluation is underpowered.** Bootstrap CIs span zero in 5/6 backtest cells due to ~7 daily blocks per week. A production evaluation requires months of out-of-sample data, not weeks.
+
+**Recall is low at any viable precision threshold.** The classifier captures at most 16% of toxic flow at breakeven precision. The fundamental constraint is data resolution: without millisecond-level queue position, order-to-trade ratios, or participant identifiers, individual trade toxicity cannot be resolved with high confidence from public data.
+
+**The classifier is least calibrated where it matters most.** Underconfidence in the high-toxicity regime means spread widening will systematically under-react to the signal. This is unrecognised risk — worse than overconfidence, which would merely cost revenue.
+
+**k is calibrated on one asset in one regime.** k=5 was chosen from BTC week 1 only. Per-asset calibration would be more principled but risks overfitting to the single in-sample week available.
+
+**Three structural gaps prevent direct application of equity microstructure frameworks:**
+
+1. *Anonymity.* Frameworks like Cartea & Sánchez-Betancourt (2025) assume named counterparties. Crypto order flow is anonymous by construction.
+
+2. *Venue structure.* Crypto perpetual futures combine spot and derivatives features, with funding rate arbitrage creating informed-appearing flow that is mechanically rather than informationally driven.
+
+3. *Data resolution.* Without millisecond queue position, order-to-trade ratios, or participant identifiers, individual trade toxicity cannot be resolved from public data alone.
+
+**What a production system would need:** co-location and nanosecond timestamps; order-to-trade ratios to distinguish aggressive informed flow from layering; cross-venue signal aggregation across spot, perp, and options; real transaction costs that make the spread-widening tradeoff economically precise.
+
+---
+
+## Reproducing Results
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run tests
+pytest tests/
+
+# Feature pipeline (requires raw Bybit data)
+python src/features/build_features.py
+
+# Classifier evaluation
+jupyter notebook notebooks/03_classifier_evaluation.ipynb
+
+# VPIN robustness grid
+python src/evaluations/vpin_robustness.py
+
+# Backtest + bootstrap CIs
+python src/evaluations/bootstrap_eval.py
+```
+
+Raw data: Bybit public data portal (data.bybit.com). Assets: BTCUSDT, ETHUSDT, SOLUSDT USDT perpetual contracts. Weeks: Sep 9–15 2024, Oct 28 – Nov 3 2024, Feb 24 – Mar 2 2025.
