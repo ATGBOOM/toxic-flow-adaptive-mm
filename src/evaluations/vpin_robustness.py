@@ -24,6 +24,7 @@ than other weeks as a result. This is flagged in output.
 
 from __future__ import annotations
 
+import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -32,126 +33,12 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-# ── VPIN implementation (mirrors src/models/vpin.py) ─────────────────────────
-# Reproduced here so the grid search is self-contained and doesn't depend
-# on import paths. Keep in sync with the canonical implementation.
-
-def build_volume_buckets(
-    qty: np.ndarray,
-    sign: np.ndarray,
-    timestamps: np.ndarray,
-    bucket_size: float,
-) -> list[dict]:
-    """
-    Partition trades into volume buckets of fixed size.
-
-    Trades straddling a bucket boundary are split proportionally.
-
-    Args:
-        qty: Trade quantities in base asset units.
-        sign: Trade direction (+1 buy, -1 sell).
-        timestamps: Trade timestamps (any numeric unit).
-        bucket_size: Target volume per bucket in base asset units.
-
-    Returns:
-        List of dicts with keys: v_buy, v_sell, timestamp (last trade in bucket).
-    """
-    buckets = []
-    v_buy = 0.0
-    v_sell = 0.0
-    last_ts = None
-
-    for i in range(len(qty)):
-        remaining = qty[i]
-        direction = sign[i]
-        ts = timestamps[i]
-
-        while remaining > 0:
-            capacity = bucket_size - (v_buy + v_sell)
-            fill = min(remaining, capacity)
-
-            if direction > 0:
-                v_buy += fill
-            else:
-                v_sell += fill
-
-            remaining -= fill
-            last_ts = ts
-
-            if abs(v_buy + v_sell - bucket_size) < 1e-9:
-                buckets.append({"v_buy": v_buy, "v_sell": v_sell, "timestamp": last_ts})
-                v_buy = 0.0
-                v_sell = 0.0
-
-    # Flush partial bucket if non-empty
-    if v_buy + v_sell > 0:
-        buckets.append({"v_buy": v_buy, "v_sell": v_sell, "timestamp": last_ts})
-
-    return buckets
-
-
-def compute_rolling_vpin(
-    buckets: list[dict],
-    n_buckets: int,
-    bucket_size: float,
-) -> pd.DataFrame:
-    """
-    Compute rolling VPIN over a window of n_buckets.
-
-    VPIN_t = sum(|V_buy_i - V_sell_i|, i=t-n+1..t) / (n × V)
-
-    Uses cumsum sliding window (O(n) numpy) rather than a Python loop
-    over list slices (O(n × n_buckets)), giving 100-800x speedup at
-    large n values.
-
-    Args:
-        buckets: Output of build_volume_buckets.
-        n_buckets: Rolling window length.
-        bucket_size: Bucket size V (denominator normalisation).
-
-    Returns:
-        DataFrame with columns: timestamp, vpin.
-    """
-    if len(buckets) < n_buckets:
-        return pd.DataFrame(columns=["timestamp", "vpin"])
-
-    imbalances = np.array([abs(b["v_buy"] - b["v_sell"]) for b in buckets])
-    timestamps = np.array([b["timestamp"] for b in buckets])
-
-    # Sliding window sum via cumsum: O(n) vs O(n * n_buckets)
-    cs = np.concatenate([[0.0], np.cumsum(imbalances)])
-    window_sums = cs[n_buckets:] - cs[:-n_buckets]
-    vpin_values = window_sums / (n_buckets * bucket_size)
-
-    # Each VPIN value corresponds to the last bucket in its window
-    return pd.DataFrame({
-        "timestamp": timestamps[n_buckets - 1:],
-        "vpin": vpin_values,
-    })
-
-
-def compute_vpin(
-    df: pd.DataFrame,
-    bucket_size: float,
-    n_buckets: int = 50,
-) -> pd.DataFrame:
-    """
-    Top-level VPIN computation: bucket trades, compute rolling VPIN.
-
-    Args:
-        df: Trade DataFrame with columns: qty, sign, timestamp.
-        bucket_size: Volume per bucket in base asset units.
-        n_buckets: Rolling window length.
-
-    Returns:
-        DataFrame with columns: timestamp, vpin.
-    """
-    qty = df["qty"].to_numpy()
-    sign = df["sign"].to_numpy()
-    ts = df["timestamp"].to_numpy()
-
-    buckets = build_volume_buckets(qty, sign, ts, bucket_size)
-    return compute_rolling_vpin(buckets, n_buckets, bucket_size)
+# ── VPIN implementation ──────────────────────────────────────────────────────
+# Single source of truth: src/models/vpin.py. Imported here (rather than
+# reproduced) so the grid search uses the exact production VPIN and cannot
+# drift from the implementation that feeds the feature matrix.
+sys.path.insert(0, str(Path(__file__).parent.parent / "models"))
+from vpin import compute_vpin  # noqa: E402
 
 
 # ── AUC computation ───────────────────────────────────────────────────────────

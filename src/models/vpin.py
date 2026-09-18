@@ -73,15 +73,22 @@ def compute_rolling_vpins(
         DataFrame with columns [timestamp, vpin]. One row per complete window,
         timestamped at the last bucket in that window.
     """
-    vpins = []
-    for i in range(n_buckets, len(volume_buckets) + 1):
-        window = volume_buckets[i - n_buckets:i]
-        vpin = sum(abs(b['v_buy'] - b['v_sell']) for b in window) / (n_buckets * bucket_size)
-        vpins.append({
-            'timestamp': volume_buckets[i - 1]['timestamp'],
-            'vpin': vpin
-        })
-    return pd.DataFrame(vpins)
+    if len(volume_buckets) < n_buckets:
+        return pd.DataFrame(columns=["timestamp", "vpin"])
+
+    imbalances = np.array([abs(b["v_buy"] - b["v_sell"]) for b in volume_buckets])
+    timestamps = np.array([b["timestamp"] for b in volume_buckets])
+
+    # Sliding-window sum via cumsum: O(n) instead of O(n * n_buckets) list slicing.
+    cs = np.concatenate([[0.0], np.cumsum(imbalances)])
+    window_sums = cs[n_buckets:] - cs[:-n_buckets]
+    vpin_values = window_sums / (n_buckets * bucket_size)
+
+    # Each VPIN value is timestamped at the last bucket in its window.
+    return pd.DataFrame({
+        "timestamp": timestamps[n_buckets - 1:],
+        "vpin": vpin_values,
+    })
 
 
 def compute_vpin(df: pd.DataFrame, bucket_size: float, n_buckets: int = 50) -> pd.DataFrame:

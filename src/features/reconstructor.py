@@ -7,6 +7,12 @@ from pathlib import Path
 import pandas as pd
 
 
+# Number of decimals to which price keys are rounded before use as dict keys.
+# Canonicalizing to instrument precision keeps one real price level from
+# splitting into two distinct float keys via representation drift.
+PRICE_KEY_DECIMALS = 8
+
+
 def apply_update(bids: dict, asks: dict, message: dict) -> None:
     """Apply a single order-book snapshot or delta message to the live book.
 
@@ -29,14 +35,18 @@ def apply_update(bids: dict, asks: dict, message: dict) -> None:
         asks.clear()
 
     for price, size in message["data"]["b"]:
-        price, size = float(price), float(size)
+        # Round the price key to instrument precision so representation drift
+        # can't split one real level into two keys (or miss a later delete).
+        price, size = round(float(price), PRICE_KEY_DECIMALS), float(size)
         if size == 0:
             bids.pop(price, None)  # pop with default avoids KeyError
         else:
             bids[price] = size
 
     for price, size in message["data"]["a"]:
-        price, size = float(price), float(size)
+        # Round the price key to instrument precision so representation drift
+        # can't split one real level into two keys (or miss a later delete).
+        price, size = round(float(price), PRICE_KEY_DECIMALS), float(size)
         if size == 0:
             asks.pop(price, None)
         else:

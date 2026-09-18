@@ -1,5 +1,6 @@
 # pipeline.py
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -56,7 +57,11 @@ def process_all() -> None:
             if not file.name.endswith('.csv.gz'):
                 continue
             # filename format: BTCUSDT2024-09-09.csv.gz
-            date_str = file.name.replace(asset, '').replace('.csv.gz', '')
+            date_match = re.search(r'\d{4}-\d{2}-\d{2}', file.name)
+            if date_match is None:
+                print(f"  Skipping {file.name} — no date found")
+                continue
+            date_str = date_match.group()
             week = date_to_week(date_str)
             if week is None:
                 print(f"  Skipping {file.name} — no matching week")

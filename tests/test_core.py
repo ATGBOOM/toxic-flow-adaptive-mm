@@ -6,7 +6,9 @@ Run from repo root:  pytest tests/
 """
 
 from pathlib import Path
+import json
 import sys
+import zipfile
 
 import numpy as np
 import pandas as pd
@@ -20,9 +22,11 @@ sys.path.insert(0, str(ROOT / "src" / "features"))
 
 from vpin import build_volume_bucket, compute_vpin
 from build_features import add_trade_features, add_toxicity_label
+from reconstructor import apply_update, reconstruct_and_extract_from_state
 from src.evaluations import bootstrap_eval
 from src.evaluations.bootstrap_eval import run_backtest
 from src.models.classifier import data_loader
+from src.data.loader import load_trades
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,3 +373,139 @@ def test_backtest_quotes_from_previous_bar_and_fills_on_current_bar():
     assert result.loc[0, "inventory"] == 0.0
     assert result.loc[1, "inventory"] < 0.0
     assert result.loc[2, "inventory"] == pytest.approx(result.loc[1, "inventory"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 4 — Loaded trade timestamps are monotonically increasing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_load_trades_timestamps_are_monotonic(tmp_path):
+    """
+    Guards the invariant that load_trades() returns trades in chronological
+    order. Downstream logic (gap detection, VPIN volume bucketing, forward-
+    return labels) all assume time-ordered trades, so out-of-order timestamps
+    would silently corrupt every derived feature.
+
+    Method: write a gzipped CSV whose rows are deliberately OUT of timestamp
+    order, run it through load_trades(), and assert the output is monotonic.
+    This FAILS if load_trades ever emits non-monotonic timestamps.
+    """
+    raw = pd.DataFrame({
+        "timestamp": [3.0, 1.0, 2.0, 5.0, 4.0],   # intentionally unordered
+        "side":      ["Buy", "Sell", "Buy", "Sell", "Buy"],
+        "size":      [1.0, 2.0, 3.0, 4.0, 5.0],
+        "price":     [100.0, 100.1, 100.2, 100.3, 100.4],
+    })
+    csv_gz = tmp_path / "BTCUSDT2024-09-09.csv.gz"
+    raw.to_csv(csv_gz, index=False, compression="gzip")
+
+    loaded = load_trades(csv_gz)
+
+    assert loaded["timestamp"].is_monotonic_increasing
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 5 — Order-book price keys are canonicalized against float drift
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_apply_update_canonicalizes_price_key_against_float_drift():
+    """
+    A level inserted at a price carrying float representation error must still
+    be removed by a size-0 update quoted at the canonical price.
+
+    apply_update() uses the price as a dict key. The classic hazard is
+    0.1 + 0.2 == 0.30000000000000004 ≠ 0.3: with the raw float as the key, an
+    insert at 0.1 + 0.2 and a delete at 0.3 land on two different keys, so the
+    delete silently misses and leaks a phantom level. Rounding the key to
+    instrument precision collapses both to one canonical key.
+
+    Without the round() canonicalization this test fails: the bid level
+    survives the delete because pop(0.3) never matches key 0.30000000000000004.
+    """
+    bids: dict = {}
+    asks: dict = {}
+
+    drifted_price = 0.1 + 0.2            # == 0.30000000000000004, not 0.3
+    assert drifted_price != 0.3         # guard: test only bites under drift
+
+    # Insert a bid level at the drifted price plus an untouched ask level.
+    apply_update(bids, asks, {
+        "type": "delta",
+        "data": {"b": [[drifted_price, 5.0]], "a": [[0.4, 2.0]]},
+    })
+    assert len(bids) == 1
+
+    # Delete the bid at the canonical price ("0.3"); leave the ask side alone.
+    apply_update(bids, asks, {
+        "type": "delta",
+        "data": {"b": [["0.3", 0.0]], "a": []},
+    })
+
+    assert bids == {}, "size-0 update at canonical price must remove the level"
+    assert asks == {0.4: 2.0}, "opposite side must be untouched"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 6 — Book replay samples each trade causally (no look-ahead)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _write_ob_zip(tmp_path, messages):
+    """Write book messages as NDJSON inside a zip and return its path."""
+    inner = tmp_path / "book.ndjson"
+    inner.write_text("\n".join(json.dumps(m) for m in messages) + "\n")
+    zip_path = tmp_path / "book.data.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.write(inner, arcname="book.ndjson")
+    return zip_path
+
+
+def test_reconstruct_samples_book_state_at_or_before_trade_no_lookahead(tmp_path):
+    """
+    reconstruct_and_extract_from_state must sample, for each trade, the book
+    state produced by every message with ts <= the trade's ts and NOTHING after
+    it. This is the pipeline's core no-look-ahead guarantee: the features used
+    to predict a trade's toxicity must not embed information from book updates
+    that landed after the trade.
+
+    Three properties are pinned at once, using a book whose spread changes on a
+    known schedule (1 -> 2 -> 3):
+
+      * strict `<` flush + pre-update snapshot: a trade at EXACTLY a message's ts
+        sees that message applied (spread 2 at ts=2000) but not the later one
+        (not spread 3). If the loop used `<=`, or sampled post-update, this would
+        read the wrong spread.
+      * None-drop: a trade before the first two-sided book yields no row.
+      * stale-tail: a trade after the last message inherits the final book state.
+    """
+    messages = [
+        {"ts": 1000, "type": "snapshot",
+         "data": {"b": [[100.0, 5.0]], "a": [[101.0, 5.0]]}},   # spread 1
+        {"ts": 2000, "type": "delta",
+         "data": {"b": [], "a": [[101.0, 0.0], [102.0, 5.0]]}},  # -> spread 2
+        {"ts": 3000, "type": "delta",
+         "data": {"b": [[100.0, 0.0], [99.0, 5.0]], "a": []}},   # -> spread 3
+    ]
+    zip_path = _write_ob_zip(tmp_path, messages)
+
+    # trade @500 is before any two-sided book (dropped); the rest straddle the
+    # message boundaries to probe the <= vs < distinction and the tail.
+    # ns resolution so the production `astype(int64) // 1e6` recovers ms
+    trades_df = pd.DataFrame(
+        {"timestamp": pd.to_datetime([500, 1500, 2000, 4000], unit="ms").as_unit("ns")}
+    )
+
+    out = reconstruct_and_extract_from_state(zip_path, trades_df, {}, {})
+
+    # the pre-first-snapshot trade produced no row (empty book -> None)
+    assert list(out["timestamp"]) == [1500, 2000, 4000]
+
+    by_ts = out.set_index("timestamp")
+    # trade @1500: only the snapshot applied -> spread 1 (did NOT see @2000)
+    assert by_ts.loc[1500, "spread"] == pytest.approx(1.0)
+    assert by_ts.loc[1500, "midprice"] == pytest.approx(100.5)
+    # trade @2000: @2000 delta applied (spread 2), @3000 NOT yet -> proves `<`
+    assert by_ts.loc[2000, "spread"] == pytest.approx(2.0)
+    assert by_ts.loc[2000, "midprice"] == pytest.approx(101.0)
+    # trade @4000: past the last message -> final (stale) book -> spread 3
+    assert by_ts.loc[4000, "spread"] == pytest.approx(3.0)
+    assert by_ts.loc[4000, "midprice"] == pytest.approx(100.5)

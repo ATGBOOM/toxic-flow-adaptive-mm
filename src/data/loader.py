@@ -25,6 +25,11 @@ def load_trades(file_path: str | Path) -> pd.DataFrame:
     # timestamp is Unix seconds as float — convert to datetime
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
 
+    # enforce chronological order: downstream logic (gap detection below,
+    # VPIN bucketing, forward-return labels) assumes trades are time-ordered,
+    # so guarantee the invariant here rather than assuming the source is sorted
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
     # standardise direction to +1/-1 (Buy = +1, Sell = -1)
     df["sign"] = df["side"].map({"Buy": 1, "Sell": -1})
     df.drop(columns=["side"], inplace=True)
