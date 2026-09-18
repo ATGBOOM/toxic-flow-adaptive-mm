@@ -36,7 +36,7 @@ def build_volume_bucket(df: pd.DataFrame, bucket_size: float) -> list[dict]:
         while remaining_qty > 0:
             capacity = bucket_size - (vol['v_buy'] + vol['v_sell'])
 
-            if remaining_qty <= capacity:
+            if remaining_qty < capacity:
                 if sign == 1:
                     vol['v_buy'] += remaining_qty
                 else:
@@ -44,6 +44,8 @@ def build_volume_bucket(df: pd.DataFrame, bucket_size: float) -> list[dict]:
                 vol['timestamp'] = ts
                 remaining_qty = 0
             else:
+                # A trade that exactly fills the remaining capacity closes the
+                # bucket now; do not wait for the next trade to flush it.
                 if sign == 1:
                     vol['v_buy'] += capacity
                 else:

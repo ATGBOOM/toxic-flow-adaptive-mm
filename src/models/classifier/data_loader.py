@@ -32,11 +32,18 @@ def load_asset_week(data_dir: str | Path, asset: str, week: str) -> pd.DataFrame
 
     Returns:
         DataFrame with RAW_FEATURES plus spread_bps, microprice_minus_mid,
-        qty_normalised, asset_id, and toxic columns. Rows with NaN VPIN or
-        any remaining NaN features are dropped.
+        qty_normalised, asset_id, toxic, timestamp, and source_row columns.
+        Rows with invalid labels, NaN VPIN, or remaining NaN features are
+        dropped. timestamp/source_row preserve identity for causal prediction
+        export and backtest alignment.
     """
     path = Path(data_dir) / f"{asset}_{week}_full_features.parquet"
     df = pd.read_parquet(path, columns=LOAD_COLS)
+    df['source_row'] = np.arange(len(df), dtype=np.int64)
+
+    # Labels without the full requested forward horizon are invalid.
+    df = df.dropna(subset=['toxic']).copy()
+    df['toxic'] = df['toxic'].astype(bool)
 
     # --- Engineer new features ---
 
@@ -56,7 +63,7 @@ def load_asset_week(data_dir: str | Path, asset: str, week: str) -> pd.DataFrame
     df = df.dropna(subset=['vpin'])
 
     # Drop raw columns we no longer need
-    df = df.drop(columns=['spread', 'microprice', 'midprice', 'qty', 'timestamp'])
+    df = df.drop(columns=['spread', 'microprice', 'midprice', 'qty'])
 
     # Drop any remaining NaNs in features
     df = df.dropna()

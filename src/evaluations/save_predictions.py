@@ -87,8 +87,11 @@ def run() -> None:
         p_vpin   = clf.predict_proba(X, 'vpin')
 
         preds = pd.DataFrame({
-            'asset':   asset,
-            'y_true':  y,
+            'asset':    asset,
+            'week':     'week3',
+            'source_row': df['source_row'].to_numpy(),
+            'timestamp': df['timestamp'].to_numpy(),
+            'y_true':   y,
             'p_logreg': p_logreg,
             'p_gbt':    p_gbt,
             'p_vpin':   p_vpin,

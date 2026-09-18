@@ -14,11 +14,15 @@ import pytest
 
 # ── make src subpackages importable when pytest is run from repo root ─────────
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src" / "models"))
 sys.path.insert(0, str(ROOT / "src" / "features"))
 
-from vpin import compute_vpin
+from vpin import build_volume_bucket, compute_vpin
 from build_features import add_trade_features, add_toxicity_label
+from src.evaluations import bootstrap_eval
+from src.evaluations.bootstrap_eval import run_backtest
+from src.models.classifier import data_loader
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,28 +38,17 @@ def test_vpin_hand_computed():
 
     Trade-by-trade trace through build_volume_bucket():
       T0: buy  qty=10 → vol={v_buy=10, v_sell=0}            cap_used=10/20
-      T1: sell qty=10 → vol={v_buy=10, v_sell=10}           cap_used=20/20 (full)
-      T2: buy  qty=15 → cap=0, remaining=15 > 0 ⇒
-                         flush B1={v_buy=10, v_sell=10, ts=T2's timestamp};
-                         new bucket: {v_buy=15}
-      T3: sell qty= 5 → vol={v_buy=15, v_sell=5}            cap_used=20/20 (full)
-      T4: buy  qty=20 → cap=0, remaining=20 > 0 ⇒
-                         flush B2={v_buy=15, v_sell=5, ts=T4's timestamp};
-                         new partial bucket (not returned)
+      T1: sell qty=10 → close B1={v_buy=10, v_sell=10, ts=T1}
+      T2: buy  qty=15 → new bucket={v_buy=15}
+      T3: sell qty= 5 → close B2={v_buy=15, v_sell=5, ts=T3}
+      T4: buy  qty=20 → close B3={v_buy=20, v_sell=0, ts=T4}
 
-    Note: the bucket timestamp is stamped by the trade that causes the flush
-    (not the last trade that filled the bucket), because build_volume_bucket()
-    writes vol['timestamp'] = ts before calling buckets.append(vol.copy()).
+    A bucket closes immediately when the filling trade reaches the exact
+    boundary, and its timestamp is that filling trade's timestamp.
 
-    Two complete buckets:
-      B1: v_buy=10, v_sell=10  → |imbalance| = 0
-      B2: v_buy=15, v_sell=5   → |imbalance| = 10
-
-    VPIN (Easley et al.): Σ|v_buy − v_sell| / (n_buckets × bucket_size)
-                         = (0 + 10) / (2 × 20) = 0.25
-
-    With n_buckets=2 and exactly 2 complete buckets the rolling window
-    range(2, 3) yields exactly one observation.
+    Complete bucket imbalances are 0, 10, and 20. With n_buckets=2:
+      window B1+B2: (0 + 10) / (2 × 20) = 0.25, timestamp T3
+      window B2+B3: (10 + 20) / (2 × 20) = 0.75, timestamp T4
     """
     trades = pd.DataFrame({
         "timestamp": [0, 1, 2, 3, 4],
@@ -66,9 +59,25 @@ def test_vpin_hand_computed():
 
     result = compute_vpin(trades, bucket_size=20, n_buckets=2)
 
-    assert len(result) == 1, f"Expected 1 VPIN row, got {len(result)}"
-    got = result["vpin"].iloc[0]
-    assert abs(got - 0.25) < 1e-6, f"Expected VPIN=0.25, got {got:.10f}"
+    assert result["timestamp"].tolist() == [3, 4]
+    np.testing.assert_allclose(result["vpin"].values, [0.25, 0.75])
+
+
+def test_vpin_bucket_closes_on_exact_fill():
+    """An exact fill must emit the bucket without waiting for another trade."""
+    trades = pd.DataFrame({
+        "timestamp": [100, 200],
+        "qty": [4.0, 6.0],
+        "sign": [1, -1],
+    })
+
+    buckets = build_volume_bucket(trades, bucket_size=10.0)
+
+    assert buckets == [{
+        "v_buy": 4.0,
+        "v_sell": 6.0,
+        "timestamp": 200,
+    }]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,3 +213,159 @@ def test_no_lookahead_leakage_rolling_features():
                 f"{len(bad)} row(s) differ (first at row {bad[0]}). "
                 f"full={full_vals[bad[0]]:.8g}, trunc={trunc_vals[bad[0]]:.8g}"
             )
+
+
+def test_trade_features_include_current_trade_and_window_boundary():
+    """Hand-check inclusive trailing windows immediately after each trade."""
+    trades = pd.DataFrame({
+        "ts_ms": [0.0, 1_000.0, 5_000.0, 10_000.0],
+        "qty": [1.0, 2.0, 3.0, 4.0],
+        "sign": [1, -1, 1, -1],
+        "price": [100.0, 100.0, 100.0, 100.0],
+    })
+
+    result = add_trade_features(trades)
+
+    assert result["trade_intensity_1s"].tolist() == [1, 2, 1, 1]
+    assert result["trade_intensity_5s"].tolist() == [1, 2, 3, 2]
+    assert result["trade_intensity_10s"].tolist() == [1, 2, 3, 4]
+    np.testing.assert_allclose(
+        result["volume_acceleration"].values,
+        [6.0, 6.0, 6.0, 4.2],
+    )
+    np.testing.assert_allclose(
+        result["signed_vol_imbalance_10s"].values,
+        [1.0, -1.0, 2.0, -2.0],
+    )
+
+
+def test_toxicity_label_invalid_without_full_forward_horizon():
+    """Trailing rows are invalid rather than clipped to the final price."""
+    trades = pd.DataFrame({
+        "ts_ms": [0.0, 10_000.0, 15_000.0],
+        "price": [100.0, 101.0, 200.0],
+        "sign": [1, 1, 1],
+    })
+
+    result = add_toxicity_label(trades, threshold_bps=8, horizon_s=10)
+
+    assert result.loc[0, "fwd_10s_bps"] == pytest.approx(100.0)
+    assert result.loc[0, "toxic"] == True
+    assert result["fwd_10s_bps"].iloc[1:].isna().all()
+    assert result["toxic"].iloc[1:].isna().all()
+
+
+def test_classifier_loader_drops_invalid_labels_and_preserves_identity(monkeypatch):
+    """Model/evaluation exports retain causal identity after invalid rows drop."""
+    frame = pd.DataFrame({
+        **{name: [1.0, 1.0, 1.0] for name in data_loader.RAW_FEATURES},
+        "spread": [0.2, 0.2, 0.2],
+        "microprice": [100.0, 100.0, 100.0],
+        "midprice": [100.0, 100.0, 100.0],
+        "qty": [1.0, 1.0, 1.0],
+        "toxic": pd.Series([True, pd.NA, False], dtype="boolean"),
+        "timestamp": pd.to_datetime([1, 2, 3], unit="s"),
+    })
+    monkeypatch.setattr(
+        data_loader.pd,
+        "read_parquet",
+        lambda *args, **kwargs: frame.copy(),
+    )
+
+    loaded = data_loader.load_asset_week("unused", "BTCUSDT", "week3")
+
+    assert loaded["toxic"].tolist() == [True, False]
+    assert loaded["source_row"].tolist() == [0, 2]
+    assert loaded["timestamp"].tolist() == [frame.loc[0, "timestamp"], frame.loc[2, "timestamp"]]
+
+
+def test_backtest_loader_aligns_predictions_by_source_row_and_timestamp(monkeypatch):
+    """Prediction export keeps identity through label/feature row filtering."""
+    timestamps = pd.to_datetime([1, 2, 3], unit="s")
+    features = pd.DataFrame({
+        "timestamp": timestamps,
+        "price": [100.0, 101.0, 102.0],
+        "sign": [1, -1, 1],
+        "qty": [1.0, 1.0, 1.0],
+        "spread": [0.2, 0.2, 0.2],
+        "midprice": [100.0, 101.0, 102.0],
+        "toxic": [False, True, False],
+    })
+    predictions = pd.DataFrame({
+        "asset": ["BTCUSDT", "BTCUSDT"],
+        "week": ["week3", "week3"],
+        "source_row": [2, 0],
+        "timestamp": [timestamps[2], timestamps[0]],
+        "p_logreg": [0.9, 0.1],
+    })
+
+    def fake_read_parquet(path, columns):
+        frame = predictions if str(path).endswith("predictions.parquet") else features
+        return frame.loc[:, columns].copy()
+
+    monkeypatch.setattr(bootstrap_eval.pd, "read_parquet", fake_read_parquet)
+
+    loaded = bootstrap_eval.load_backtest_data(
+        Path("features"),
+        Path("predictions.parquet"),
+        "BTCUSDT",
+        "week3",
+    )
+
+    assert loaded["source_row"].tolist() == [0, 2]
+    assert loaded["timestamp"].tolist() == [timestamps[0], timestamps[2]]
+    assert loaded["p_logreg"].tolist() == [0.1, 0.9]
+
+
+def _causal_backtest_bars() -> pd.DataFrame:
+    return pd.DataFrame({
+        "timestamp": pd.to_datetime([0, 1, 2], unit="s"),
+        "mid": [100.0, 200.0, 200.0],
+        "best_bid": [99.9, 199.9, 199.9],
+        "best_ask": [100.1, 200.1, 200.1],
+        "any_buy": [False, True, True],
+        "any_sell": [False, False, False],
+        "max_buy_price": [0.0, 100.15, 200.15],
+        "min_sell_price": [0.0, 0.0, 0.0],
+        "p_logreg": [0.0, 1.0, 0.0],
+        "realised_toxic_rate": [0.0, 0.0, 1.0],
+    })
+
+
+def test_backtest_ignores_realised_target_column():
+    """Changing the ex-post target cannot change strategy decisions."""
+    bars = _causal_backtest_bars()
+    changed_target = bars.copy()
+    changed_target["realised_toxic_rate"] = [1.0, 1.0, 0.0]
+
+    original = run_backtest(bars, k=5, signal_column="p_logreg", sigma_window=2)
+    changed = run_backtest(
+        changed_target,
+        k=5,
+        signal_column="p_logreg",
+        sigma_window=2,
+    )
+
+    pd.testing.assert_frame_equal(original, changed)
+
+
+def test_backtest_requires_prediction_instead_of_realised_target():
+    """The realised label cannot silently become the strategy signal."""
+    bars = _causal_backtest_bars().drop(columns=["p_logreg"])
+
+    with pytest.raises(KeyError, match="Prediction column 'p_logreg' is required"):
+        run_backtest(bars, k=5, signal_column="p_logreg", sigma_window=2)
+
+
+def test_backtest_quotes_from_previous_bar_and_fills_on_current_bar():
+    """Bar t state/signal place the quote tested against bar t+1 trades."""
+    result = run_backtest(
+        _causal_backtest_bars(),
+        k=5,
+        signal_column="p_logreg",
+        sigma_window=2,
+    )
+
+    assert result.loc[0, "inventory"] == 0.0
+    assert result.loc[1, "inventory"] < 0.0
+    assert result.loc[2, "inventory"] == pytest.approx(result.loc[1, "inventory"])

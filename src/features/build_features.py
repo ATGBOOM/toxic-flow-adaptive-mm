@@ -10,10 +10,12 @@ from vpin import compute_vpin
 
 
 def add_trade_features(trades_df: pd.DataFrame) -> pd.DataFrame:
-    """Add backward-looking trade-derived features to a trades DataFrame.
+    """Add causal trailing-window trade features to a trades DataFrame.
 
-    All features are computed using only data at or before each row's
-    timestamp — no look-ahead leakage.
+    Features are computed immediately after observing the current trade. Each
+    trailing window is inclusive at both ends, [timestamp - window, timestamp],
+    so the current trade and trades exactly on the lower boundary are included.
+    No future trade is used.
 
     Args:
         trades_df: DataFrame with columns [ts_ms, qty, sign, price] where
@@ -32,23 +34,28 @@ def add_trade_features(trades_df: pd.DataFrame) -> pd.DataFrame:
     # trade intensity
     for window_s in [1, 5, 10]:
         window_ms = window_s * 1000
-        lookback_idx = np.searchsorted(ts, ts - window_ms)
-        trades_df[f"trade_intensity_{window_s}s"] = np.arange(len(ts)) - lookback_idx
+        lookback_idx = np.searchsorted(ts, ts - window_ms, side="left")
+        trades_df[f"trade_intensity_{window_s}s"] = (
+            np.arange(len(ts)) - lookback_idx + 1
+        )
 
     # volume acceleration
-    cum_qty = np.cumsum(qty)
-    idx_5s = np.searchsorted(ts, ts - 5000)
-    idx_30s = np.searchsorted(ts, ts - 30000)
-    vol_5s = cum_qty - cum_qty[idx_5s]
-    vol_30s = cum_qty - cum_qty[idx_30s]
+    qty_prefix = np.concatenate(([0.0], np.cumsum(qty)))
+    row_ends = np.arange(1, len(ts) + 1)
+    idx_5s = np.searchsorted(ts, ts - 5000, side="left")
+    idx_30s = np.searchsorted(ts, ts - 30000, side="left")
+    vol_5s = qty_prefix[row_ends] - qty_prefix[idx_5s]
+    vol_30s = qty_prefix[row_ends] - qty_prefix[idx_30s]
     expected_5s = vol_30s * (5 / 30)
     with np.errstate(invalid='ignore'):
         trades_df["volume_acceleration"] = np.where(expected_5s > 0, vol_5s / expected_5s, 1.0)
 
     # signed volume imbalance
-    cum_signed_qty = np.cumsum(signs * qty)
-    idx_10s = np.searchsorted(ts, ts - 10000)
-    trades_df["signed_vol_imbalance_10s"] = cum_signed_qty - cum_signed_qty[idx_10s]
+    signed_prefix = np.concatenate(([0.0], np.cumsum(signs * qty)))
+    idx_10s = np.searchsorted(ts, ts - 10000, side="left")
+    trades_df["signed_vol_imbalance_10s"] = (
+        signed_prefix[row_ends] - signed_prefix[idx_10s]
+    )
 
     return trades_df
 
@@ -107,20 +114,37 @@ def add_toxicity_label(
 
     Returns:
         The same DataFrame with new columns fwd_10s_bps (forward return in
-        bps) and toxic (bool, True when the trade is classified as toxic).
+        bps) and toxic (nullable boolean). Rows without the full requested
+        forward horizon are invalid and receive missing values in both columns.
     """
     ts = trades_df["ts_ms"].values
     prices = trades_df["price"].values
     signs = trades_df["sign"].values
 
+    if len(trades_df) == 0:
+        trades_df["fwd_10s_bps"] = pd.Series(dtype=float)
+        trades_df["toxic"] = pd.Series(dtype="boolean")
+        return trades_df
+
     horizon_ms = horizon_s * 1000
-    future_idx = np.searchsorted(ts, ts + horizon_ms)
-    future_idx = np.clip(future_idx, 0, len(prices) - 1)
-    fwd_bps = (prices[future_idx] - prices) / prices * 10000
+    target_ts = ts + horizon_ms
+    future_idx = np.searchsorted(ts, target_ts, side="left")
+    valid = (target_ts <= ts[-1]) & (future_idx < len(prices))
+
+    fwd_bps = np.full(len(prices), np.nan, dtype=float)
+    fwd_bps[valid] = (
+        (prices[future_idx[valid]] - prices[valid]) / prices[valid] * 10000
+    )
+
+    toxic = pd.Series(pd.NA, index=trades_df.index, dtype="boolean")
+    toxic_valid = (
+        ((signs[valid] == 1) & (fwd_bps[valid] > threshold_bps))
+        | ((signs[valid] == -1) & (fwd_bps[valid] < -threshold_bps))
+    )
+    toxic.iloc[np.flatnonzero(valid)] = toxic_valid
 
     trades_df["fwd_10s_bps"] = fwd_bps
-    trades_df["toxic"] = ((signs == 1) & (fwd_bps > threshold_bps)) | \
-                          ((signs == -1) & (fwd_bps < -threshold_bps))
+    trades_df["toxic"] = toxic
 
     return trades_df
 

@@ -2,7 +2,7 @@
 
 **Research question:** Do equity microstructure tools — specifically VPIN-based toxic flow detection — transfer to anonymous, high-frequency cryptocurrency perpetual futures markets?
 
-**Key finding:** VPIN fails as a standalone toxicity detector at standard equity-market parameters (AUC 0.506, indistinguishable from random at V=1/50, n=50), with partial recovery at shorter rolling windows (AUC up to 0.615 at n=20) consistent with the structural mechanism: two-sided aggressive trading during corrections suppresses net order imbalance even when adverse selection is at its peak. A logistic classifier on trade intensity features achieves AP 0.294 vs VPIN baseline 0.177 on the stress regime (bootstrap 95% CI: [0.287, 0.304] vs [0.171, 0.183]). An adaptive Avellaneda-Stoikov market maker using the classifier signal shows directionally consistent MtM improvement across all six out-of-sample asset-week combinations, with the only statistically distinguishable result in the highest-toxicity cell (ETH stress: 95% CI [+$78, +$178]).
+**Key finding:** VPIN fails as a standalone toxicity detector at standard equity-market parameters (AUC 0.506, indistinguishable from random at V=1/50, n=50), with partial recovery at shorter rolling windows (AUC up to 0.615 at n=20) consistent with the structural mechanism: two-sided aggressive trading during corrections suppresses net order imbalance even when adverse selection is at its peak. A logistic classifier on trade intensity features achieves AP 0.294 vs VPIN baseline 0.177 on the stress regime (bootstrap 95% CI: [0.287, 0.304] vs [0.171, 0.183]). The recorded market-making PnL table used the realised forward-looking label and has not been rerun after causal hardening, so it is not evidence of classifier-driven PnL improvement.
 
 ---
 
@@ -11,6 +11,21 @@
 This project implements and critically evaluates a pipeline of equity market microstructure tools on cryptocurrency perpetual futures data from Bybit, across three assets (BTCUSDT, ETHUSDT, SOLUSDT) and three deliberately chosen market regimes. The framing is methodological — testing whether patterns documented in equity markets transfer to anonymous, high-frequency crypto venues — not a trading system.
 
 The pipeline covers: VPIN implementation from scratch following Easley et al. (2012), a supervised toxicity classifier with rigorous walk-forward evaluation, and an adaptive market-making strategy based on Avellaneda & Stoikov (2008) that uses the classifier signal to adjust quotes dynamically. Each component is evaluated against an analytical or statistical baseline, and failure modes are documented as carefully as successes.
+
+> **Audit status:** The reusable backtest now requires a named timestamped
+> prediction such as `p_logreg` and applies prior-bar state/signal to later-bar
+> fills. The historical PnL table was produced by the earlier realised-label
+> path and has not been rerun; it remains an oracle-signal result, not evidence
+> of classifier-driven PnL improvement. The AP bootstrap and SHAP ranking also
+> require the corrections documented in
+> [`docs/AUDIT_FINDINGS.md`](docs/AUDIT_FINDINGS.md) before final presentation.
+
+### Learning and Defense Materials
+
+- [`docs/CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md) — module-by-module code and equation walkthrough
+- [`docs/AUDIT_FINDINGS.md`](docs/AUDIT_FINDINGS.md) — claim validation and correction checklist
+- [`docs/PRESENTATION_GUIDE.md`](docs/PRESENTATION_GUIDE.md) — 12-slide presentation narrative
+- [`docs/DEFENSE_QA.md`](docs/DEFENSE_QA.md) — likely technical questions and concise answers
 
 ## Papers
 
@@ -263,10 +278,12 @@ Confidence intervals do not overlap. The logistic regression outperformance on t
 
 **Baseline:** Avellaneda-Stoikov (2008) infinite-horizon market maker with inventory skew. At high fill frequency on BTC perps (κ ≈ 19 trades/bar), the A-S spread formula collapses to one minimum tick ($0.10) and becomes independent of γ. Inventory control operates entirely through reservation price skew.
 
-**Adaptive extension:** spread widens proportionally to per-bar classifier toxicity rate:
+**Hardened reusable extension:** spread widens proportionally to a named
+out-of-sample prediction, using bar `t` state and signal for quotes evaluated
+against bar `t+1` trades:
 
 ```
-adaptive_spread = market_spread × (1 + k × toxic_rate)
+adaptive_spread = market_spread × (1 + k × p_logreg)
 ```
 
 k=5 calibrated on BTC week 1 (in-sample). Applied unchanged to weeks 2 and 3. Fill size derived from a risk budget:
@@ -277,9 +294,10 @@ fill_size = α × market_spread / (σ × mid)    [α = 0.5]
 
 **Why Cartea & Sánchez-Betancourt (2025) does not transfer:** their closed-form price adjustment assumes the broker can identify informed and uninformed clients by name and stream bespoke quotes to each. Crypto order flow is anonymous by construction — there is no mechanism to separate client streams, rendering the signal extraction and optimal discount derivation inoperable. The anonymous venue structure is a hard constraint, not a data limitation.
 
-### Out-of-Sample Results
+### Historical Oracle-Signal Results — Not Rerun
 
-k calibrated on week 1 only. Weeks 2 and 3 are strictly out-of-sample.
+The following recorded table used the realised forward-looking label, not
+`p_logreg`. It predates the causal hardening and has not been recomputed.
 
 | Asset | Week | Baseline MtM ($) | Adaptive MtM ($) | Improvement ($) | 95% CI | Toxic Fill Rate — Base | Toxic Fill Rate — Adaptive | Avg Spread Ratio |
 |-------|------|-----------------|-----------------|-----------------|--------|----------------------|--------------------------|-----------------|
@@ -292,15 +310,21 @@ k calibrated on week 1 only. Weeks 2 and 3 are strictly out-of-sample.
 
 CIs computed via block bootstrap (B=200, daily blocks, percentile method). ~4–7 daily blocks per week — the evaluation is genuinely underpowered.
 
-### Key Findings
+### Historical Observations, Not Classifier-PnL Findings
 
-All six out-of-sample cells show positive improvement. Five of six CIs span zero, reflecting ~7 daily bootstrap blocks per week — the evaluation cannot distinguish signal from noise at this data volume. The honest claim is directional, not conclusive.
+All six historical oracle-signal cells show positive improvement. Five of six
+CIs span zero, and the bootstrap construction also needs redesign. These values
+cannot support a classifier-PnL claim.
 
-**ETH week 3 is the only statistically distinguishable result.** CI [+$78, +$178] lies entirely above zero despite only 4 daily blocks. ETH week 3 is the stress/correction regime with 12.6% baseline toxic fill rate and average spread ratio of 1.40 — the highest-toxicity cell in the evaluation. The signal has most value precisely when informed flow is most concentrated.
+**The recorded ETH week 3 interval is not reliable evidence.** It used an oracle
+signal, only four daily blocks, and the historical block-concatenation method.
 
-**The adaptive strategy consistently reduces toxic fill rate in every cell.** The mechanism is working: wider spreads on toxic bars prevent fills at adverse prices. The largest reduction is in the highest-toxicity cells (SOL week 3: 16.2% → 13.7%).
+**The oracle experiment recorded lower realised toxic-fill rates.** That is an
+upper-bound diagnostic, not proof that model probabilities achieve the same
+effect.
 
-**BTC dollar improvements are larger in absolute terms due to notional, not signal strength.** BTC week 3 (+$1,991) reflects larger fill sizes at higher prices, not a stronger classifier signal. SOL and ETH show comparable percentage improvements.
+**The historical dollar differences are not corrected metrics.** They are kept
+only as an audit trail until a fresh prediction-driven evaluation is run.
 
 ---
 
