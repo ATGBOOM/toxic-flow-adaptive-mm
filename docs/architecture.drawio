@@ -65,7 +65,21 @@
         <mxCell id="e8" value="full_features.parquet — 16 feats + toxic label (~1M rows/asset-week)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="feat" target="clf">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e9" value="p_logreg (named, timestamped)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="clf" target="eval">
+        <mxCell id="preds" value="&lt;i&gt;predictions.parquet&lt;/i&gt;&lt;br&gt;p_logreg — keyed by source row + timestamp" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8f8f8;strokeColor=#b0b0b0;dashed=1;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="300" y="922" width="300" height="42" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nb" value="&lt;b&gt;Notebooks — reporting&lt;/b&gt;&lt;br&gt;&lt;i&gt;notebooks/&lt;/i&gt;&lt;br&gt;&#8226; EDA · classifier eval · backtest figures&lt;br&gt;&#8226; presentation layer, NOT runtime pipeline" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#c2c6ce;dashed=1;fontColor=#666666;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="670" y="970" width="210" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" value="p_logreg (named, timestamped)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="clf" target="preds">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="read by row + ts" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="preds" target="eval">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="figures" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;dashed=1;" edge="1" parent="1" source="eval" target="nb">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
