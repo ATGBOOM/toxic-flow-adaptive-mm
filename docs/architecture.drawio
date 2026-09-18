@@ -1,0 +1,75 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram id="toxic-flow-arch" name="Architecture">
+    <mxGraphModel dx="1100" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Toxic-Flow Detection &amp; Adaptive Market-Making — Pipeline Architecture" style="text;html=1;align=center;verticalAlign=middle;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="120" y="10" width="660" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="data" value="&lt;b&gt;Bybit public data&lt;/b&gt;&lt;br&gt;USDT perpetual futures: BTC / ETH / SOL&lt;br&gt;3 regime weeks (calm · breakout · stress)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="300" y="50" width="300" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="clean" value="&lt;b&gt;[1] Clean trades&lt;/b&gt;&lt;br&gt;&lt;i&gt;data/loader.py · pipeline.py&lt;/i&gt;&lt;br&gt;&#8226; ts→datetime · Buy/Sell→±1&lt;br&gt;&#8226; size→qty · &gt;60s gap warnings&lt;br&gt;&#8226; group days → weekly parquet" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="70" y="200" width="300" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="book" value="&lt;b&gt;[2] L2 book replay&lt;/b&gt;&lt;br&gt;&lt;i&gt;features/reconstructor.py&lt;/i&gt;&lt;br&gt;&#8226; apply_update: snapshot clears / delta mutates / size 0 = delete&lt;br&gt;&#8226; compute_book_features: spread, mid, microprice, depth_imbal 1/5/10/25, pressure&lt;br&gt;&#8226; sample book state AT each trade ts (Option B)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="490" y="190" width="350" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vpin" value="&lt;b&gt;[3] VPIN — volume clock&lt;/b&gt;&lt;br&gt;&lt;i&gt;models/vpin.py&lt;/i&gt;&lt;br&gt;&#8226; buckets = 1/50 daily volume&lt;br&gt;&#8226; rolling 50-bucket |buy−sell| imbalance&lt;br&gt;&#8226; side branch — different clock" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="70" y="400" width="300" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bookfeat" value="&lt;i&gt;book_features.parquet&lt;/i&gt;&lt;br&gt;(per asset-day)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8f8f8;strokeColor=#b0b0b0;dashed=1;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="540" y="410" width="250" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="feat" value="&lt;b&gt;[4] Feature matrix&lt;/b&gt;&lt;br&gt;&lt;i&gt;features/build_features.py&lt;/i&gt;&lt;br&gt;&#8226; merge book + trades (positional, len-checked)&lt;br&gt;&#8226; trade_intensity · vol_accel · signed OFI&lt;br&gt;&#8226; toxic label: adverse move &gt;8bps within 10s" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="250" y="590" width="400" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="clf" value="&lt;b&gt;[5] Classifier&lt;/b&gt;&lt;br&gt;&lt;i&gt;models/classifier/&lt;/i&gt;&lt;br&gt;&#8226; walk-forward: w1→w2, w1+w2→w3 (no random splits)&lt;br&gt;&#8226; VPIN baseline · LogReg · CatBoost&lt;br&gt;&#8226; 500k stratified subsample · StandardScaler (LR)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="250" y="780" width="400" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="eval" value="&lt;b&gt;[6] Evaluation&lt;/b&gt;&lt;br&gt;&lt;i&gt;evaluations/ · notebooks/&lt;/i&gt;&lt;br&gt;&#8226; AP / AUC / Brier + bootstrap 95% CI&lt;br&gt;&#8226; Avellaneda–Stoikov MM, spread widens ∝ p_toxic&lt;br&gt;&#8226; PnL table = historical oracle result, NOT rerun" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="250" y="970" width="400" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="trades *.csv.gz" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="data" target="clean">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="orderbook *.data.zip (L2, 500 lvl)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="data" target="book">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="volume clock" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="clean" target="vpin">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="sample @ trade ts" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="book" target="bookfeat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="trade rows" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="clean" target="feat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="positional merge" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="bookfeat" target="feat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="forward-fill" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="vpin" target="feat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="full_features.parquet — 16 feats + toxic label (~1M rows/asset-week)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="feat" target="clf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="p_logreg (named, timestamped)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="clf" target="eval">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
