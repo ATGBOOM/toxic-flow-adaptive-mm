@@ -155,24 +155,24 @@
     <div class="pad">
       <div class="overline">Reflection</div>
       <div class="rule"></div>
-      <h2>What I&rsquo;d fix, and what I&rsquo;d add</h2>
+      <h2>What&rsquo;s still open, and what&rsquo;s next</h2>
       <div class="grid">
         <div class="col">
           <h3>Fix</h3>
-          <p class="sub">Rigour &amp; correctness</p>
-          <div class="item"><b>Causal backtest.</b> Hardened to a named prediction (<code>p_logreg</code>, prior-bar → next-bar fill). The old PnL table is a historical oracle-signal result and was not rerun.</div>
-          <div class="item"><b>Merge robustness.</b> Book features are aligned positionally; a timestamp-keyed join removes a silent drift risk.</div>
-          <div class="item"><b>Statistical power.</b> ~7 daily blocks/week &mdash; CIs span zero in 5 of 6 cells. Needs months of untouched out-of-sample data.</div>
+          <p class="sub">Still open</p>
+          <div class="item"><b>Merge robustness.</b> The trade/book merge is positional with a row-count guard; a timestamp-keyed join removes the silent drift risk properly.</div>
+          <div class="item"><b>Historical results not rerun.</b> The PnL table and confidence intervals predate the causal fix &mdash; they&rsquo;re a historical, oracle-signal result, not evidence of classifier-driven improvement yet.</div>
+          <div class="item"><b>Statistical power.</b> ~7 daily blocks per week &mdash; confidence intervals span zero in most cells. Needs months of untouched out-of-sample data, not three selected weeks.</div>
         </div>
         <div class="col">
           <h3>Add</h3>
           <p class="sub">Toward production</p>
-          <div class="item"><b>Streaming ingestion.</b> Event-time, queue-based feed with online/incremental features and an incremental top-of-book &mdash; replacing the per-trade full re-sort.</div>
-          <div class="item"><b>Richer data.</b> Direct feed for true queue position, order-to-trade ratio, and participant identity &mdash; the resolution ceiling public data can&rsquo;t cross.</div>
-          <div class="item"><b>Cross-venue signal.</b> Aggregate spot / perp / options, with real transaction-cost modelling in the spread decision.</div>
+          <div class="item"><b>Event-time streaming.</b> Replace batch replay with live ingestion and an incrementally maintained book, instead of a full re-sort per trade.</div>
+          <div class="item"><b>Real transaction costs.</b> Queue position, fees, and rebates &mdash; the current fill model is optimistic about what actually gets filled and at what price.</div>
+          <div class="item"><b>Longer untouched data.</b> Months of live data, not a hand-selected three-week sample across three regimes.</div>
         </div>
       </div>
-      <div class="takeaway"><b>Takeaway:</b> a defensible negative result with an honest audit trail &mdash; the value is in the correctness discipline, not a profit claim.</div>
+      <div class="takeaway"><b>Takeaway:</b> the value here isn&rsquo;t a profitable strategy claim &mdash; it&rsquo;s the discipline of finding out exactly where a pipeline like this breaks, and being honest about what&rsquo;s still unverified.</div>
     </div>
     <div class="pageno">03</div>
   </section>

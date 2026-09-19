@@ -624,7 +624,7 @@ def main(
                 prediction_path,
                 asset,
                 week,
-                prediction_column,
+                signal_column,
             )
             all_data[(asset, week)] = df
             print(f"  {asset} {week}: {len(df):,} ticks")

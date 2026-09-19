@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 
 import pandas as pd
+from sortedcontainers import SortedDict
 
 
 # Number of decimals to which price keys are rounded before use as dict keys.
@@ -13,14 +14,14 @@ import pandas as pd
 PRICE_KEY_DECIMALS = 8
 
 
-def apply_update(bids: dict, asks: dict, message: dict) -> None:
+def apply_update(bids: SortedDict, asks: SortedDict, message: dict) -> None:
     """Apply a single order-book snapshot or delta message to the live book.
 
     Args:
-        bids: Mutable dict mapping price (float) to size (float) for the
-            bid side. Modified in-place.
-        asks: Mutable dict mapping price (float) to size (float) for the
-            ask side. Modified in-place.
+        bids: Mutable SortedDict mapping price (float) to size (float) for
+            the bid side, kept in ascending price order. Modified in-place.
+        asks: Mutable SortedDict mapping price (float) to size (float) for
+            the ask side, kept in ascending price order. Modified in-place.
         message: Parsed JSON message with keys 'type' ('snapshot' or 'delta')
             and 'data' containing 'b' (bid updates) and 'a' (ask updates),
             each a list of [price, size] pairs.
@@ -53,12 +54,14 @@ def apply_update(bids: dict, asks: dict, message: dict) -> None:
             asks[price] = size
 
 
-def compute_book_features(bids: dict, asks: dict) -> dict | None:
+def compute_book_features(bids: SortedDict, asks: SortedDict) -> dict | None:
     """Compute microstructure features from the current order book state.
 
     Args:
-        bids: Dict mapping price (float) to size (float) for bid levels.
-        asks: Dict mapping price (float) to size (float) for ask levels.
+        bids: SortedDict mapping price (float) to size (float) for bid
+            levels, kept in ascending price order.
+        asks: SortedDict mapping price (float) to size (float) for ask
+            levels, kept in ascending price order.
 
     Returns:
         Dict of feature values (spread, microprice, midprice, depth_imbalance_N
@@ -67,12 +70,11 @@ def compute_book_features(bids: dict, asks: dict) -> dict | None:
     """
     if not bids or not asks:
         return None
-    sorted_bids = sorted(bids.keys(), reverse=True)
-    sorted_asks = sorted(asks.keys())
-    best_bid = sorted_bids[0]
-    best_ask = sorted_asks[0]
-    bid_size = bids[best_bid]
-    ask_size = asks[best_ask]
+    # bids/asks are maintained in sorted order incrementally by SortedDict,
+    # so best bid/ask and top-N depth never re-sort the whole book here —
+    # that used to be the dominant cost of the whole feature build.
+    best_bid, bid_size = bids.peekitem(-1)  # highest bid price
+    best_ask, ask_size = asks.peekitem(0)   # lowest ask price
 
     spread = best_ask - best_bid
     microprice = (best_bid * ask_size + best_ask * bid_size) / (bid_size + ask_size)
@@ -84,15 +86,18 @@ def compute_book_features(bids: dict, asks: dict) -> dict | None:
         "midprice": midprice,
     }
 
+    bid_vals = bids.values()
+    ask_vals = asks.values()
+
     for n in [1, 5, 10, 25]:
-        bid_vol = sum(bids[p] for p in sorted_bids[:n])
-        ask_vol = sum(asks[p] for p in sorted_asks[:n])
+        bid_vol = sum(bid_vals[-n:])   # n highest bids (order doesn't matter for a sum)
+        ask_vol = sum(ask_vals[:n])    # n lowest asks
         features[f"depth_imbalance_{n}"] = (bid_vol - ask_vol) / (bid_vol + ask_vol)
 
-    bid_vol_5 = sum(bids[p] for p in sorted_bids[:5])
-    bid_vol_25 = sum(bids[p] for p in sorted_bids[:25])
-    ask_vol_5 = sum(asks[p] for p in sorted_asks[:5])
-    ask_vol_25 = sum(asks[p] for p in sorted_asks[:25])
+    bid_vol_5 = sum(bid_vals[-5:])
+    bid_vol_25 = sum(bid_vals[-25:])
+    ask_vol_5 = sum(ask_vals[:5])
+    ask_vol_25 = sum(ask_vals[:25])
 
     features["bid_pressure"] = bid_vol_5 / bid_vol_25
     features["ask_pressure"] = ask_vol_5 / ask_vol_25
@@ -104,8 +109,8 @@ def compute_book_features(bids: dict, asks: dict) -> dict | None:
 def reconstruct_and_extract_from_state(
     ob_zip_path: str | Path,
     trades_df: pd.DataFrame,
-    bids: dict,
-    asks: dict,
+    bids: SortedDict,
+    asks: SortedDict,
 ) -> pd.DataFrame:
     """Replay order-book messages and extract book features at each trade timestamp.
 
@@ -118,9 +123,9 @@ def reconstruct_and_extract_from_state(
             book stream (one JSON object per line).
         trades_df: DataFrame of trades for the day with a timestamp column
             (nanosecond epoch integers convertible via astype int64 // 1e6).
-        bids: Mutable bid-side book state dict, shared across calls to allow
-            the book to persist between days.
-        asks: Mutable ask-side book state dict, shared across calls.
+        bids: Mutable bid-side book state (SortedDict), shared across calls
+            to allow the book to persist between days.
+        asks: Mutable ask-side book state (SortedDict), shared across calls.
 
     Returns:
         DataFrame with one row per trade and columns for each book feature
@@ -139,6 +144,7 @@ def reconstruct_and_extract_from_state(
                 msg = json.loads(line)
                 book_ts = msg["ts"]
 
+                #invariant: the features should be computed for trades before the next message, so classifiers laters have no look ahead bias
                 while trade_idx < n_trades and trade_times[trade_idx] < book_ts:
                     features = compute_book_features(bids, asks)
                     if features is not None:
@@ -187,8 +193,8 @@ def process_week(
     trade_ts_ms = trades_df["timestamp"].astype("int64") // 10**6
 
     os.makedirs(output_dir, exist_ok=True)
-    bids: dict = {}
-    asks: dict = {}
+    bids = SortedDict()
+    asks = SortedDict()
 
     for date_str in week_dates:
         zip_name = f"{date_str}_{asset}_ob500.data.zip"

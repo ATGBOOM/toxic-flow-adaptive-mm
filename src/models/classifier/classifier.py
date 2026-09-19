@@ -124,6 +124,7 @@ class ToxicityClassifier:
                 l2_leaf_reg=3,
                 verbose=100,
                 random_seed=42,
+                scale_pos_weight=(1 - y_train.mean()) / y_train.mean(),
             )
             gbt.fit(X_train, y_train)
         else:

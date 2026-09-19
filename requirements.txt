@@ -5,10 +5,12 @@
 pandas==3.0.2
 numpy==2.4.4
 pyarrow==23.0.1
+sortedcontainers==2.4.0
 
 # Machine learning
 scikit-learn==1.8.0
 catboost==1.2.10
+xgboost==3.4.1  # fallback if catboost's native extension can't load (e.g. Python 3.14)
 joblib==1.5.3
 shap==0.51.0
 

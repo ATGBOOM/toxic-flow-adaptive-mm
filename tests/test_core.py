@@ -13,6 +13,7 @@ import zipfile
 import numpy as np
 import pandas as pd
 import pytest
+from sortedcontainers import SortedDict
 
 # ── make src subpackages importable when pytest is run from repo root ─────────
 ROOT = Path(__file__).parent.parent
@@ -422,8 +423,8 @@ def test_apply_update_canonicalizes_price_key_against_float_drift():
     Without the round() canonicalization this test fails: the bid level
     survives the delete because pop(0.3) never matches key 0.30000000000000004.
     """
-    bids: dict = {}
-    asks: dict = {}
+    bids = SortedDict()
+    asks = SortedDict()
 
     drifted_price = 0.1 + 0.2            # == 0.30000000000000004, not 0.3
     assert drifted_price != 0.3         # guard: test only bites under drift
@@ -494,7 +495,7 @@ def test_reconstruct_samples_book_state_at_or_before_trade_no_lookahead(tmp_path
         {"timestamp": pd.to_datetime([500, 1500, 2000, 4000], unit="ms").as_unit("ns")}
     )
 
-    out = reconstruct_and_extract_from_state(zip_path, trades_df, {}, {})
+    out = reconstruct_and_extract_from_state(zip_path, trades_df, SortedDict(), SortedDict())
 
     # the pre-first-snapshot trade produced no row (empty book -> None)
     assert list(out["timestamp"]) == [1500, 2000, 4000]
