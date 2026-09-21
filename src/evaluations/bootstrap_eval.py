@@ -20,6 +20,17 @@ underpowered. CIs will be wide. This is the honest result.
 Performance: uses vectorised backtest (precompute all bar-level scalars,
 tight Python loop only for path-dependent inventory/cash tracking).
 ~0.5-1s per backtest run on 600k bars vs ~30s with iterrows().
+
+File layout follows presentation order, not alphabetical/historical order:
+  1. Load & align predictions      (load_backtest_data)
+  2. Build bars                    (build_bars)
+  3. Backtest engine — the algorithm (run_backtest)
+  4. Bootstrap: resample + CI      (_run_both_strategies, _mtm_improvement,
+                                     block_bootstrap_improvement,
+                                     compute_bootstrap_ci)
+  5. Regime table & reporting      (toxic_fill_rate, avg_spread_ratio,
+                                     build_regime_table)
+  6. Main
 """
 
 from __future__ import annotations
@@ -32,7 +43,160 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-# ── Backtest engine ───────────────────────────────────────────────────────────
+# ── 1. Load & align predictions ─────────────────────────────────────────────
+
+BACKTEST_COLS = [
+    "timestamp",
+    "price",
+    "sign",
+    "qty",
+    "spread",
+    "midprice",
+    "toxic",
+]
+
+
+def load_backtest_data(
+    data_dir: Path,
+    predictions_path: Path,
+    asset: str,
+    week: str,
+    prediction_column: str = "p_logreg",
+) -> pd.DataFrame:
+    """
+    Load features and align timestamped out-of-sample predictions by row identity.
+
+    Args:
+        data_dir: Path to processed features directory.
+        predictions_path: Parquet export containing asset, week, source_row,
+            timestamp, and the named prediction column.
+        asset: Asset name, e.g. 'BTCUSDT'.
+        week: Week label, e.g. 'week2'.
+        prediction_column: Prediction column to use as the strategy signal.
+
+    Returns:
+        Tick-level DataFrame ready for build_bars().
+    """
+    path = data_dir / f"{asset}_{week}_full_features.parquet"
+    df = pd.read_parquet(path, columns=BACKTEST_COLS)
+    df["source_row"] = np.arange(len(df), dtype=np.int64)
+    df = df.dropna(subset=BACKTEST_COLS).copy()
+
+    prediction_cols = [
+        "asset",
+        "week",
+        "source_row",
+        "timestamp",
+        prediction_column,
+    ]
+    predictions = pd.read_parquet(predictions_path, columns=prediction_cols)
+    predictions = predictions[
+        (predictions["asset"] == asset) & (predictions["week"] == week)
+    ].dropna(subset=[prediction_column])
+
+    df = df.merge(
+        predictions[["source_row", "timestamp", prediction_column]],
+        on="source_row",
+        how="inner",
+        suffixes=("", "_prediction"),
+        validate="one_to_one",
+    )
+    if pd.api.types.is_numeric_dtype(df["timestamp"]):
+        feature_ts = pd.to_datetime(df["timestamp"], unit="s")
+    else:
+        feature_ts = pd.to_datetime(df["timestamp"])
+    if pd.api.types.is_numeric_dtype(df["timestamp_prediction"]):
+        prediction_ts = pd.to_datetime(df["timestamp_prediction"], unit="s")
+    else:
+        prediction_ts = pd.to_datetime(df["timestamp_prediction"])
+
+    if not np.array_equal(
+        feature_ts.astype("int64").to_numpy(),
+        prediction_ts.astype("int64").to_numpy(),
+    ):
+        raise ValueError("Prediction timestamps do not match feature-row timestamps")
+
+    df["timestamp"] = feature_ts
+    df = (
+        df.drop(columns=["timestamp_prediction"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    df["best_bid"]  = df["midprice"] - df["spread"] / 2
+    df["best_ask"]  = df["midprice"] + df["spread"] / 2
+    df["mid"]       = df["midprice"]
+    return df
+
+
+# ── 2. Build bars ────────────────────────────────────────────────────────────
+
+def build_bars(
+    df: pd.DataFrame,
+    signal_column: str = "p_logreg",
+) -> pd.DataFrame:
+    """
+    Aggregate tick-level trades into 1-second bars.
+
+    Args:
+        df: Tick-level DataFrame with columns: timestamp, sign, qty,
+            price, best_bid, best_ask, mid, and the named prediction column.
+            An optional toxic column is retained only as realised ex-post data.
+        signal_column: Prediction column to aggregate for later quote decisions.
+
+    Returns:
+        Bar-level DataFrame.
+    """
+    if signal_column not in df.columns:
+        raise KeyError(f"Missing prediction column '{signal_column}'")
+
+    df = df.copy()
+    if pd.api.types.is_numeric_dtype(df["timestamp"]):
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="s")
+    else:
+        df["datetime"] = pd.to_datetime(df["timestamp"])
+    df = df.set_index("datetime")
+
+    buys  = df[df["sign"] == 1]
+    sells = df[df["sign"] == -1]
+
+    bar_columns = {
+        "mid":            df["mid"].resample("1s").last(),
+        "best_bid":       df["best_bid"].resample("1s").last(),
+        "best_ask":       df["best_ask"].resample("1s").last(),
+        "any_buy":        buys["qty"].resample("1s").count() > 0,
+        "any_sell":       sells["qty"].resample("1s").count() > 0,
+        "max_buy_price":  buys["price"].resample("1s").max(),
+        "min_sell_price": sells["price"].resample("1s").min(),
+        "buy_volume":     buys["qty"].resample("1s").sum(),
+        "sell_volume":    sells["qty"].resample("1s").sum(),
+        signal_column:    df[signal_column].resample("1s").last(),
+        "buy_trades":     buys["qty"].resample("1s").count(),
+        "sell_trades":    sells["qty"].resample("1s").count(),
+    }
+    if "toxic" in df.columns:
+        bar_columns["realised_toxic_rate"] = df["toxic"].resample("1s").mean()
+    bars = pd.DataFrame(bar_columns)
+
+    bars["any_buy"]          = bars["any_buy"].fillna(False)
+    bars["any_sell"]         = bars["any_sell"].fillna(False)
+    bars["max_buy_price"]    = bars["max_buy_price"].fillna(0)
+    bars["min_sell_price"]   = bars["min_sell_price"].fillna(0)
+    bars["buy_volume"]       = bars["buy_volume"].fillna(0)
+    bars["sell_volume"]      = bars["sell_volume"].fillna(0)
+    bars["buy_trades"]       = bars["buy_trades"].fillna(0)
+    bars["sell_trades"]      = bars["sell_trades"].fillna(0)
+    if "realised_toxic_rate" in bars.columns:
+        bars["realised_toxic_rate"] = bars["realised_toxic_rate"].fillna(0)
+
+    bars = (
+        bars.dropna(subset=["mid", signal_column])
+        .reset_index()
+        .rename(columns={"datetime": "timestamp"})
+    )
+    return bars
+
+
+# ── 3. Backtest engine — the core algorithm ─────────────────────────────────
 
 def run_backtest(
     bars: pd.DataFrame,
@@ -161,158 +325,7 @@ def run_backtest(
     return pd.DataFrame({"timestamp": ts_arr, "mtm_pnl": mtm_arr, "inventory": inv_arr})
 
 
-def build_bars(
-    df: pd.DataFrame,
-    signal_column: str = "p_logreg",
-) -> pd.DataFrame:
-    """
-    Aggregate tick-level trades into 1-second bars.
-
-    Args:
-        df: Tick-level DataFrame with columns: timestamp, sign, qty,
-            price, best_bid, best_ask, mid, and the named prediction column.
-            An optional toxic column is retained only as realised ex-post data.
-        signal_column: Prediction column to aggregate for later quote decisions.
-
-    Returns:
-        Bar-level DataFrame.
-    """
-    if signal_column not in df.columns:
-        raise KeyError(f"Missing prediction column '{signal_column}'")
-
-    df = df.copy()
-    if pd.api.types.is_numeric_dtype(df["timestamp"]):
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="s")
-    else:
-        df["datetime"] = pd.to_datetime(df["timestamp"])
-    df = df.set_index("datetime")
-
-    buys  = df[df["sign"] == 1]
-    sells = df[df["sign"] == -1]
-
-    bar_columns = {
-        "mid":            df["mid"].resample("1s").last(),
-        "best_bid":       df["best_bid"].resample("1s").last(),
-        "best_ask":       df["best_ask"].resample("1s").last(),
-        "any_buy":        buys["qty"].resample("1s").count() > 0,
-        "any_sell":       sells["qty"].resample("1s").count() > 0,
-        "max_buy_price":  buys["price"].resample("1s").max(),
-        "min_sell_price": sells["price"].resample("1s").min(),
-        "buy_volume":     buys["qty"].resample("1s").sum(),
-        "sell_volume":    sells["qty"].resample("1s").sum(),
-        signal_column:    df[signal_column].resample("1s").last(),
-        "buy_trades":     buys["qty"].resample("1s").count(),
-        "sell_trades":    sells["qty"].resample("1s").count(),
-    }
-    if "toxic" in df.columns:
-        bar_columns["realised_toxic_rate"] = df["toxic"].resample("1s").mean()
-    bars = pd.DataFrame(bar_columns)
-
-    bars["any_buy"]          = bars["any_buy"].fillna(False)
-    bars["any_sell"]         = bars["any_sell"].fillna(False)
-    bars["max_buy_price"]    = bars["max_buy_price"].fillna(0)
-    bars["min_sell_price"]   = bars["min_sell_price"].fillna(0)
-    bars["buy_volume"]       = bars["buy_volume"].fillna(0)
-    bars["sell_volume"]      = bars["sell_volume"].fillna(0)
-    bars["buy_trades"]       = bars["buy_trades"].fillna(0)
-    bars["sell_trades"]      = bars["sell_trades"].fillna(0)
-    if "realised_toxic_rate" in bars.columns:
-        bars["realised_toxic_rate"] = bars["realised_toxic_rate"].fillna(0)
-
-    bars = (
-        bars.dropna(subset=["mid", signal_column])
-        .reset_index()
-        .rename(columns={"datetime": "timestamp"})
-    )
-    return bars
-
-
-# ── Data loading ──────────────────────────────────────────────────────────────
-
-BACKTEST_COLS = [
-    "timestamp",
-    "price",
-    "sign",
-    "qty",
-    "spread",
-    "midprice",
-    "toxic",
-]
-
-
-def load_backtest_data(
-    data_dir: Path,
-    predictions_path: Path,
-    asset: str,
-    week: str,
-    prediction_column: str = "p_logreg",
-) -> pd.DataFrame:
-    """
-    Load features and align timestamped out-of-sample predictions by row identity.
-
-    Args:
-        data_dir: Path to processed features directory.
-        predictions_path: Parquet export containing asset, week, source_row,
-            timestamp, and the named prediction column.
-        asset: Asset name, e.g. 'BTCUSDT'.
-        week: Week label, e.g. 'week2'.
-        prediction_column: Prediction column to use as the strategy signal.
-
-    Returns:
-        Tick-level DataFrame ready for build_bars().
-    """
-    path = data_dir / f"{asset}_{week}_full_features.parquet"
-    df = pd.read_parquet(path, columns=BACKTEST_COLS)
-    df["source_row"] = np.arange(len(df), dtype=np.int64)
-    df = df.dropna(subset=BACKTEST_COLS).copy()
-
-    prediction_cols = [
-        "asset",
-        "week",
-        "source_row",
-        "timestamp",
-        prediction_column,
-    ]
-    predictions = pd.read_parquet(predictions_path, columns=prediction_cols)
-    predictions = predictions[
-        (predictions["asset"] == asset) & (predictions["week"] == week)
-    ].dropna(subset=[prediction_column])
-
-    df = df.merge(
-        predictions[["source_row", "timestamp", prediction_column]],
-        on="source_row",
-        how="inner",
-        suffixes=("", "_prediction"),
-        validate="one_to_one",
-    )
-    if pd.api.types.is_numeric_dtype(df["timestamp"]):
-        feature_ts = pd.to_datetime(df["timestamp"], unit="s")
-    else:
-        feature_ts = pd.to_datetime(df["timestamp"])
-    if pd.api.types.is_numeric_dtype(df["timestamp_prediction"]):
-        prediction_ts = pd.to_datetime(df["timestamp_prediction"], unit="s")
-    else:
-        prediction_ts = pd.to_datetime(df["timestamp_prediction"])
-
-    if not np.array_equal(
-        feature_ts.astype("int64").to_numpy(),
-        prediction_ts.astype("int64").to_numpy(),
-    ):
-        raise ValueError("Prediction timestamps do not match feature-row timestamps")
-
-    df["timestamp"] = feature_ts
-    df = (
-        df.drop(columns=["timestamp_prediction"])
-        .sort_values("timestamp")
-        .reset_index(drop=True)
-    )
-    df["best_bid"]  = df["midprice"] - df["spread"] / 2
-    df["best_ask"]  = df["midprice"] + df["spread"] / 2
-    df["mid"]       = df["midprice"]
-    return df
-
-
-# ── Bootstrap engine ──────────────────────────────────────────────────────────
+# ── 4. Bootstrap: resample + confidence interval ────────────────────────────
 
 class BootstrapResult(NamedTuple):
     asset: str
@@ -326,6 +339,26 @@ class BootstrapResult(NamedTuple):
     std_bootstrap: float
 
 
+def _run_both_strategies(
+    bars: pd.DataFrame,
+    k_baseline: float,
+    k_adaptive: float,
+    signal_column: str = "p_logreg",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run both strategies once and return their full result DataFrames.
+
+    Shared by _mtm_improvement (which only needs the final scalar
+    difference, e.g. inside the 200x bootstrap loop where each resample is
+    genuinely new data) and by callers that need the full per-bar output —
+    compute_bootstrap_ci's observed value and build_regime_table both used
+    to call run_backtest() a second and third time on the same unresampled
+    bars just to get this; now they reuse one computation instead.
+    """
+    base = run_backtest(bars, k=k_baseline, signal_column=signal_column)
+    adap = run_backtest(bars, k=k_adaptive, signal_column=signal_column)
+    return base, adap
+
+
 def _mtm_improvement(
     bars: pd.DataFrame,
     k_baseline: float,
@@ -333,8 +366,7 @@ def _mtm_improvement(
     signal_column: str = "p_logreg",
 ) -> float:
     """Run both strategies on bars and return final MtM improvement."""
-    base = run_backtest(bars, k=k_baseline, signal_column=signal_column)
-    adap = run_backtest(bars, k=k_adaptive, signal_column=signal_column)
+    base, adap = _run_both_strategies(bars, k_baseline, k_adaptive, signal_column)
     return float(adap["mtm_pnl"].iloc[-1] - base["mtm_pnl"].iloc[-1])
 
 
@@ -397,6 +429,8 @@ def block_bootstrap_improvement(
 
 def compute_bootstrap_ci(
     bars: pd.DataFrame,
+    res_base: pd.DataFrame,
+    res_adap: pd.DataFrame,
     asset: str,
     week: str,
     k_baseline: float = 0,
@@ -414,7 +448,14 @@ def compute_bootstrap_ci(
     no skew correction needed.
 
     Args:
-        bars: Bar-level DataFrame for one asset-week.
+        bars: Bar-level DataFrame for one asset-week (used for the
+            resampled bootstrap runs — each resample is genuinely new data
+            and must be backtested fresh).
+        res_base: Already-computed run_backtest() output for k_baseline on
+            the unresampled bars, from _run_both_strategies() — reused here
+            instead of rerun, since the caller already needed it.
+        res_adap: Already-computed run_backtest() output for k_adaptive on
+            the unresampled bars, same reasoning.
         asset: Asset label for reporting.
         week: Week label for reporting.
         k_baseline: k for static strategy.
@@ -427,12 +468,7 @@ def compute_bootstrap_ci(
     Returns:
         BootstrapResult namedtuple.
     """
-    observed = _mtm_improvement(
-        bars,
-        k_baseline,
-        k_adaptive,
-        signal_column,
-    )
+    observed = float(res_adap["mtm_pnl"].iloc[-1] - res_base["mtm_pnl"].iloc[-1])
     boot_dist, n_blocks = block_bootstrap_improvement(
         bars,
         k_baseline,
@@ -457,7 +493,7 @@ def compute_bootstrap_ci(
     )
 
 
-# ── Per-regime breakdown table ────────────────────────────────────────────────
+# ── 5. Regime table & reporting ─────────────────────────────────────────────
 
 def toxic_fill_rate(bars: pd.DataFrame, results: pd.DataFrame) -> float:
     """
@@ -506,8 +542,8 @@ def avg_spread_ratio(
 
 def build_regime_table(
     all_bars: dict[tuple[str, str], pd.DataFrame],
+    backtest_results: dict[tuple[str, str], tuple[pd.DataFrame, pd.DataFrame]],
     bootstrap_results: list[BootstrapResult],
-    k_baseline: float = 0,
     k_adaptive: float = 5,
     out_of_sample_weeks: list[str] | None = None,
     signal_column: str = "p_logreg",
@@ -517,9 +553,14 @@ def build_regime_table(
 
     Args:
         all_bars: Dict mapping (asset, week) → bar DataFrame.
+        backtest_results: Dict mapping (asset, week) → (res_base, res_adap),
+            the already-computed unresampled backtest runs from
+            _run_both_strategies() — reused here instead of rerunning
+            run_backtest() a second/third time on the same bars.
         bootstrap_results: List of BootstrapResult for out-of-sample weeks.
-        k_baseline: k for static strategy.
-        k_adaptive: k for adaptive strategy.
+        k_adaptive: k for adaptive strategy, used only by avg_spread_ratio
+            (k_baseline isn't needed here — it's already baked into
+            backtest_results).
         out_of_sample_weeks: Weeks to include (default: week2, week3).
         signal_column: Named prediction column used by the adaptive strategy.
 
@@ -537,16 +578,7 @@ def build_regime_table(
         if week not in out_of_sample_weeks:
             continue
 
-        res_base = run_backtest(
-            bars,
-            k=k_baseline,
-            signal_column=signal_column,
-        )
-        res_adap = run_backtest(
-            bars,
-            k=k_adaptive,
-            signal_column=signal_column,
-        )
+        res_base, res_adap = backtest_results[(asset, week)]
         mtm_base    = res_base["mtm_pnl"].iloc[-1]
         mtm_adap    = res_adap["mtm_pnl"].iloc[-1]
         improvement = mtm_adap - mtm_base
@@ -574,7 +606,7 @@ def build_regime_table(
     return pd.DataFrame(rows)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── 6. Main ──────────────────────────────────────────────────────────────────
 
 def main(
     data_dir: str = "data/processed/features",
@@ -637,6 +669,16 @@ def main(
         all_bars[(asset, week)] = bars
         print(f"  {asset} {week}: {len(bars):,} bars")
 
+    # ── Backtest (once per asset-week, shared by bootstrap + regime table) ─────
+    print("\nRunning baseline + adaptive backtest on unresampled bars...")
+    backtest_results: dict[tuple[str, str], tuple[pd.DataFrame, pd.DataFrame]] = {}
+    for asset in assets:
+        for week in out_of_sample_weeks:
+            bars = all_bars[(asset, week)]
+            backtest_results[(asset, week)] = _run_both_strategies(
+                bars, k_baseline, k_adaptive, signal_column
+            )
+
     # ── Bootstrap ─────────────────────────────────────────────────────────────
     print(f"\nRunning block bootstrap (n={n_bootstrap}, seed={seed})...")
     print("Bootstrap unit: calendar day.")
@@ -646,9 +688,12 @@ def main(
     for asset in assets:
         for week in out_of_sample_weeks:
             bars = all_bars[(asset, week)]
+            res_base, res_adap = backtest_results[(asset, week)]
             print(f"  {asset} {week}...", end=" ", flush=True)
             result = compute_bootstrap_ci(
                 bars=bars,
+                res_base=res_base,
+                res_adap=res_adap,
                 asset=asset,
                 week=week,
                 k_baseline=k_baseline,
@@ -668,8 +713,8 @@ def main(
     print("\nBuilding per-regime breakdown table...")
     table = build_regime_table(
         all_bars=all_bars,
+        backtest_results=backtest_results,
         bootstrap_results=bootstrap_results,
-        k_baseline=k_baseline,
         k_adaptive=k_adaptive,
         out_of_sample_weeks=out_of_sample_weeks,
         signal_column=signal_column,

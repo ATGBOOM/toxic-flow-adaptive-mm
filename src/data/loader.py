@@ -31,7 +31,7 @@ def load_trades(file_path: str | Path) -> pd.DataFrame:
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     # standardise direction to +1/-1 (Buy = +1, Sell = -1)
-    df["sign"] = df["side"].map({"Buy": 1, "Sell": -1})
+    df["sign"] = df["side"].map({"Buy": 1, "Sell": -    1})
     df.drop(columns=["side"], inplace=True)
 
     # rename size -> qty to keep downstream code consistent

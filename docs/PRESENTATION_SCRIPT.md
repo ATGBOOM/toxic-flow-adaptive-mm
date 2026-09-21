@@ -1,402 +1,429 @@
-# Presentation Script — Final Structure
+# Presentation Notes — Self-Rehearsal Reference
 
-Engineering-led, ~16–19 min. No cold open. Two flagship deep-dives carry the
-weight; everything else is a short, tradeoff-flavored pass — a few sentences,
-not a single line — with the deeper material held for Q&A rather than spoken
-in the walkthrough itself.
+Not a script to read verbatim — you're showing the actual code on screen, so
+this is here to tell you **which file to have open, what to point at, and
+what points to hit**, in your own words. Every stop has: the file(s) to
+show, the **flow** (what happens, in order — read this first to know where
+you are), then **talking points** as short bullets, then **Reserve** —
+deeper material, not spoken unless asked.
 
-Structure: problem statement → architecture diagram → Flagship #1
-(`reconstructor.py`) → fast pass (VPIN, feature matrix, classifier,
-predictions export) → Flagship #2 (`bootstrap_eval.py`) → close.
-
-Each section below has **Say** (the actual talk track) and **Reserve** (not
-spoken — pulled out only if the interviewer asks). This mirrors how the two
-flagships work: don't front-load everything, hold depth for defense.
+~19–22 min total. No cold open. Two flagship deep-dives carry the weight;
+everything else is a fast pass, a few bullets per stop, depth held in
+Reserve.
 
 Known doc staleness, for your own awareness only, never say this unprompted:
 `AUDIT_FINDINGS.md` and `CODE_WALKTHROUGH.md` both predate the `a0ca776`
 hardening commit — they still describe `vpin_robustness.py` as containing a
 drifted duplicate VPIN implementation and claim an exact-fill bucket doesn't
-flush until the next trade. Neither is true of the current code (verified
-directly against `vpin_robustness.py` and `vpin.py`). If asked about either,
-answer from the current code, not the older docs.
+flush until the next trade. Neither is true of the current code. If asked
+about either, answer from the current code, not the older docs.
 
 ---
 
 ## 1. Problem statement (~30–45s)
 
-**Say:**
+**No file — just talk.**
 
-> This pipeline reconstructs a crypto order book from raw exchange data,
-> derives a toxicity signal and classifier from it, and backtests a
-> market-making strategy against it. The engineering problem throughout was
-> maintaining a strict no-look-ahead guarantee at every single boundary —
-> because one violation anywhere silently inflates every result downstream of
-> it. That discipline is what this talk is actually about.
-
----
-
-## 2. Architecture diagram (~60–90s)
-
-**Say**, walking the diagram left to right:
-
-> Raw Bybit data splits into two cleaning stages — trades and the L2 order
-> book — each cached separately. VPIN comes off cleaned trades. The feature
-> matrix is the merge point: trailing trade features, the forward toxicity
-> label, VPIN, and book features come together here — and it's the caching
-> boundary. Book replay is expensive and deterministic, compute once;
-> everything downstream is cheap and iterated on, so re-labelling is
-> seconds, not a replay. From there: classifier, a durable predictions
-> export, then the causal backtest. Notebooks are reporting only, not part
-> of the causal chain.
->
-> Every stage writes Parquet, not CSV or a database. Columnar and typed — a
-> stage needing three columns doesn't pay to read the rest, and dtypes
-> survive instead of round-tripping through strings. A database is the real
-> alternative, reasonable for ad hoc querying, overkill for a batch
-> pipeline where each stage just hands a typed table to the next; DuckDB
-> over these same files is the natural next step if that changed.
+- This pipeline reconstructs a crypto order book, derives a toxicity signal
+  and classifier from it, and backtests a market-making strategy.
+- The throughline for the whole talk: a strict no-look-ahead guarantee, at
+  every boundary — one violation anywhere silently inflates every result
+  downstream of it.
 
 ---
 
-## 3. Flagship #1 — `src/features/reconstructor.py` (~3–4 min)
+## 2. Architecture diagram (~90–120s)
 
-**Say:**
+**FILE:** `docs/presentation.html` — slide 2 (the diagram)
 
-> The book is two SortedDicts, price to size — bids and asks. A snapshot
-> clears both and reloads from scratch, the resync mechanism for a client
-> that missed deltas. A delta touches only the levels it names: nonzero
-> size upserts, zero deletes, everything else untouched.
->
-> From that state: best bid and ask give spread and midprice; microprice
-> weights toward whichever side has less resting size, since more bid depth
-> pushes it toward the ask — that's the side more likely to move next. I
-> compute depth imbalance at four levels and a pressure ratio comparing
-> top-five to top-25 depth per side, separating immediate top-of-book
-> pressure from the broader visible book.
->
-> I added a test that builds two floating-point representations of the same
-> price and asserts they resolve to one dictionary key. That's what caught
-> the real risk: uncanonicalized keys could split one book level into two,
-> or miss a size-zero delete on a near-match. Fixed by rounding every price
-> key to eight decimal places before it touches either dict — the test
-> guards it now.
->
-> The invariant that matters most: the replay loop samples the book for any
-> pending trade before applying the next message — strict less-than on
-> timestamp. A trade never sees a book message after its own. Violate that
-> once and a feature is built from book state the market maker couldn't
-> have observed yet — the classifier looks good in testing and fails
-> exactly where it matters, live. It's enforced by loop order, not a filter
-> checked afterward, so it can't be silently bypassed.
->
-> State persists across day boundaries by construction — the SortedDicts are
-> created once, outside the day loop, passed by reference. The book doesn't
-> treat a day as a real boundary, because it isn't one; it's just how the
-> historical files happen to be chunked.
->
-> The operations needed are upsert, delete, best bid/ask, top-N depth. I
-> started with a plain dict — O(1) upsert and delete, but best bid/ask and
-> every depth level meant sorting the entire side from scratch on every
-> single feature call, O(L log L). I replaced it with a SortedDict, which
-> keeps prices ordered incrementally as each update lands: upsert and
-> delete become O(log L), and best bid/ask is a direct lookup at either end
-> of the structure instead of a full resort — depth-N sums just take a
-> slice off either end, so nothing past the first N entries gets touched at
-> all.
->
-> That's not a free upgrade, and I benchmarked it rather than assumed it:
-> at 500 levels per side, matching Bybit's real book depth, reads come out
-> meaningfully faster, but each individual write is measurably slower than
-> a plain dict's O(1) insert. Whether that's a net win depends on how often
-> you read relative to how often you write — and in this pipeline, a read
-> happens once per trade while a write happens once per book message, and
-> messages outnumber trades by a wide margin. I worked out the actual
-> breakeven point rather than wave that away.
->
-> One design note: the book is imperative and stateful by necessity — it's
-> inherently sequential, message by message. Everything downstream, the
-> feature engineering, is pure functions over whole DataFrames instead,
-> because those transforms are vectorizable and don't need memory beyond
-> the current window. Different paradigm per stage, matched to what each
-> one actually needs.
+**Flow (walk it left to right):**
+1. Bybit data splits into two cleaning stages — trades, L2 order book.
+2. VPIN comes off cleaned trades directly (parallel to the book, not
+   downstream of it).
+3. Feature matrix is the merge point — trailing features, label, VPIN,
+   book features come together here.
+4. Classifier → predictions export → causal backtest. Notebooks are
+   reporting only, off to the side.
 
-**Reserve (Q&A only):**
+**Talking points:**
+- The merge point is also the **caching boundary** (now marked on the
+  diagram): book replay is expensive, compute once; everything below it is
+  cheap and iterated on — re-labelling is seconds, not a replay.
+- Every stage writes **Parquet**, not CSV or a database — columnar/typed,
+  a stage needing 3 columns doesn't pay to read the rest. A database is
+  the real alternative, overkill for a batch pipeline; DuckDB over these
+  files is the natural next step if that changed.
+- One invariant enforced right at entry, before anything else: the
+  **loader sorts every trade file by timestamp on load**, defensively,
+  not an assert-and-fail. Everything downstream silently assumes ascending
+  time. First instance of the invariant the rest of the talk keeps coming
+  back to.
 
-- Crossed book is unhandled — if best bid ≥ best ask, spread goes negative,
-  undetected.
-- A missing order-book day carries stale state into the next day until the
+**Reserve — `src/data/loader.py`:**
+- Sort was found unguarded during audit, now guarded by a monotonic-
+  timestamp regression test.
+- Gap detection (`diff() > 60s`) only prints — a smoke test, not gap
+  handling.
+- `side.map({"Buy": 1, "Sell": -1})` turns anything unexpected into `NaN`,
+  silently poisoning signed-volume features. No validation.
+
+---
+
+## 3. Flagship #1 — order book (~3–4 min)
+
+**FILE:** `src/features/reconstructor.py` — functions: `apply_update()`,
+`compute_book_features()`, `reconstruct_and_extract_from_state()`,
+`process_week()`
+
+> "Let's go deep on the first real engineering decision — the order book."
+
+**Flow:**
+1. `apply_update` — snapshot clears + reloads both sides; delta upserts
+   only the named levels, size 0 deletes.
+2. `compute_book_features` — best bid/ask, spread, microprice, depth
+   imbalance at 4 levels, pressure ratio.
+3. `reconstruct_and_extract_from_state` — replay loop: for each book
+   message, flush any pending trade *first* (sample book state), then
+   apply the message. Strict `<` on timestamp.
+4. `process_week` — loops days, book state (`SortedDict`) created once
+   outside the loop, carried by reference across the whole week.
+
+**Talking points:**
+- Book is two `SortedDict`s now, not plain dicts — bids/asks.
+- **The invariant that matters most:** loop samples the book for a
+  pending trade *before* applying the next message. A trade never sees a
+  book message after its own. Enforced by loop order, not a filter —
+  can't be silently bypassed.
+- **Test found a real bug:** two float representations of the same price
+  should collapse to one key; without canonicalizing to 8 decimals, a
+  size-0 delete could silently miss. Now guarded by a regression test.
+- **Continuity:** `SortedDict`s created once, outside the day loop — the
+  book doesn't treat "day" as a real boundary, because it isn't one.
+- **dict → SortedDict tradeoff:** dict was O(1) upsert but O(L·logL)
+  resort on every feature read. SortedDict: O(logL) upsert, O(logL) best
+  bid/ask via `peekitem`, O(N) depth via a slice — no full resort.
+  **Benchmarked, not assumed:** ~1.6x faster reads, ~6.7x slower writes at
+  500 levels. Reads happen once per trade, writes once per message —
+  messages vastly outnumber trades, so the real net win for *this batch
+  job* is genuinely uncertain; the complexity argument is unambiguous for
+  a live system instead.
+- Book replay is stateful/imperative by necessity (sequential messages);
+  everything downstream is pure functions over DataFrames (vectorizable).
+  Different paradigm per stage, matched to what each needs.
+
+**Reserve:**
+- Crossed book unhandled — spread can go negative, undetected.
+- Missing order-book day carries stale state into the next day until the
   next snapshot resyncs it. Known, still open.
 - `namelist()[0]` assumes exactly one inner file per zip, unguarded.
-
-**Reserve — the full data-structure decision (dict considered, SortedDict
-chosen), Q&A only:**
-
-- **Why I moved off dict:** O(1) upsert/delete, but best bid/ask and every
-  depth level required sorting the whole side from scratch on every single
-  feature call — O(L log L), paid once per sampled trade. That was
-  genuinely the dominant cost in the whole feature build before the swap.
-- **SortedDict** (`sortedcontainers.SortedDict`) — keeps prices ordered
-  continuously via an internal sorted structure. Upsert/delete: O(log L).
-  Best bid/ask: O(log L) via `peekitem` at either end, instead of a full
-  O(L log L) resort. Depth-N: a slice off either end, O(N) with small
-  constant N, nothing past it touched. No sorted structure in the Python
-  standard library, so this is a real third-party dependency
-  (`sortedcontainers`), not a stdlib swap — genuine added complexity a
-  plain dict doesn't carry.
-- **The honest benchmark, not assumed:** at 500 levels per side (Bybit's
-  real ob500 depth), measured directly — reads are about 1.6x faster with
-  SortedDict; individual writes are about 6.7x slower than a plain dict's
-  O(1) insert. Net effect depends entirely on the actual read:write ratio.
-  Working the algebra on the measured per-call costs: SortedDict only wins
-  in aggregate once reads are at least roughly 12% as frequent as writes.
-  In this pipeline, a read happens once per trade and a write happens once
-  per book message, and messages (~863k/day per asset, per the README)
-  vastly outnumber trades — so for this specific historical batch replay,
-  the real net effect is genuinely uncertain without the exact trades/day
-  figure, quite possibly close to a wash. The complexity argument is
-  unambiguous for a *live* system, where reads happen far more relative to
-  writes than in a one-time batch reconstruction — that's the honest scope
-  of the claim, not "it's just faster."
-- **Tick-indexed array** — the structure I didn't move to, and why: a flat
-  array indexed by (price − reference) / tick size gives true O(1)
-  everywhere, the fastest of any option. The cost is a fixed architectural
-  commitment — you need to know the tick size and a bounded plausible
-  price range up front. Fine for one instrument in a known band; a worse
-  fit here, replaying arbitrary historical data across three
-  differently-scaled assets without hard-coding that per-asset.
+- **Full structure comparison** (dict / SortedDict / tick-indexed array):
+  tick-indexed array is O(1) everywhere, the fastest option, but needs a
+  fixed tick size and bounded price range up front — fine for one
+  instrument, a worse fit replaying three differently-scaled assets.
 
 ---
 
-## 4. Fast pass (~3–4 min total)
+## 4. Fast pass (~4–5 min total)
 
-**Say**, a few sentences per stop, tradeoff-flavored:
+> "That's the book. In parallel — off the same cleaned trades, not
+> downstream of the book — VPIN runs independently. Moving faster through
+> the next few stages; depth is there if asked."
 
-> VPIN samples on a volume clock, not calendar time — fixed time intervals
-> overweight quiet periods and underweight real bursts, so a volume clock
-> stays calibrated to actual activity. It accumulates trades into
-> fixed-volume buckets and takes the rolling mean absolute buy/sell
-> imbalance; a bucket closes the instant it's exactly filled, timestamped
-> by the trade that filled it. The rolling window is a cumulative sum in
-> one pass — the original re-summed the whole window per bucket, which is
-> quadratic; the cumsum version is linear, verified behavior-identical by
-> regression test. I also hand-compute VPIN against a synthetic sequence
-> and check it against both the production implementation and the
-> parameter-grid script — that comparison is what caught the grid script
-> running a second, drifted implementation that kept a trailing partial
-> bucket production discards. Unified onto one canonical function.
->
-> The feature matrix merges trades, book state, and VPIN — trailing
-> windows for features, forward-only horizon for the label, so a row
-> without a full future horizon gets dropped, not clipped. Trailing windows
-> use searchsorted plus prefix sums instead of a per-row scan — O(log n)
-> per lookup instead of O(window size) per row, which matters at tens of
-> millions of rows. The merge itself is positional with a row-count guard —
-> mismatched days get skipped entirely rather than silently misaligned; a
-> timestamp-keyed join is the fix I'd still make.
->
-> Before the model comparison: the loader adds three more features —
-> spread in basis points, microprice offset, normalized quantity —
-> specifically at the classifier's load time, not upstream in the shared
-> feature build. Cross-asset pooling needs scale-invariant inputs, but
-> that's a modeling decision, not a fact about the market, so it stays at
-> the point of consumption instead of getting baked into the shared cache
-> every other consumer reads from — same caching-boundary principle as the
-> book-replay split, one layer downstream.
->
-> The classifier compares three models behind one interface — call
-> `predict_proba`, get a probability — a Strategy pattern. VPIN's `fit`
-> does nothing at all, purely so it sits in the same evaluation loop as the
-> two real sklearn models without special-casing — an adapter, making a
-> heuristic that was never trained conform to an interface built for models
-> that are. Only logistic regression gets its inputs standardized, fit on
-> train only, never refit on test — it optimizes a weighted sum via
-> gradient descent, so features on wildly different scales distort both the
-> optimizer and the L2 penalty; trees split on raw thresholds, so scaling
-> would be a no-op for them. I chose this three-model ladder over a neural
-> net or random forest because the feature set is around fifteen tabular
-> columns, where gradient boosting already matches or beats deep learning
-> with far less tuning — the real question wasn't "what's the best possible
-> model," it was whether the added complexity earns its keep over the raw
-> signal and survives a regime shift, which is what the walk-forward
-> comparison tests. Training is capped at 500k rows, stratified to preserve
-> true toxic prevalence rather than rebalanced to 50/50, because the full
-> pooled set is tens of millions of rows and reruns need to stay fast; test
-> sets are never subsampled, for an unbiased read.
->
-> Predictions export with asset, week, timestamp, and row identity
-> preserved — not just good practice, it's what lets the backtest safely
-> reattach a prediction to its trade, which is next. Exported per-asset
-> rather than pooled, deliberately: a paired statistical test comparing
-> model configurations needs one observation per asset, not one blended
-> number across all three.
+### 4a. VPIN
 
-**Reserve (Q&A only):**
+**FILE:** `src/models/vpin.py` — functions: `build_volume_bucket()`,
+`compute_rolling_vpins()`, `compute_vpin()`. Also:
+`src/evaluations/vpin_robustness.py` (the unified import).
 
-- VPIN: bucket closes immediately on an exact fill, timestamped by the
-  filling trade — this *is* correct in the current code; don't let anyone's
-  older notes about a delayed-flush bug stand, it's fixed.
-- Feature matrix: `daily_vol / 7` in `add_vpin_feature` is hardcoded and
-  doesn't account for weeks with missing days (ETH/SOL week 3) — still open.
-- Classifier: `spread_bps` and `qty_normalised` are properly cross-asset
-  normalized (computed per-asset, before pooling); `microprice_minus_mid` is
-  **not** — it's a raw dollar difference, not divided by midprice. Real,
-  still-open normalization gap, and it directly undercuts the "pooling
-  requires per-asset-invariant features" argument for that one feature
-  specifically. Own this if asked, don't paper over it.
-- Classifier: training is stratified to preserve true toxic prevalence, not
-  rebalanced to 50/50; test sets are never subsampled, for an unbiased read.
-- Predictions export: the saved `.joblib` model artifacts aren't currently
-  loaded back anywhere in the repo — a live-scoring path is exactly what
-  would consume them.
+**Flow:**
+1. `build_volume_bucket` — accumulate trades into fixed-volume buckets,
+   splitting a trade across a boundary if needed; closes the instant a
+   bucket exactly fills.
+2. `compute_rolling_vpins` — cumsum-based rolling sum over completed
+   buckets only.
+
+**Talking points:**
+- Volume clock, not calendar time — fixed time intervals overweight quiet
+  periods, underweight bursts. Same causal discipline as the book, applied
+  to a different axis: only *completed* buckets ever enter a rolling
+  value.
+- Rolling window used to re-sum the whole window per bucket (quadratic);
+  now a single cumsum pass, linear, verified behavior-identical.
+- **Found a real bug via testing:** hand-computed VPIN against a synthetic
+  sequence, checked it against both the production path and the
+  parameter-grid script — caught the grid script running a second,
+  drifted implementation. Unified onto one canonical function.
+
+### 4b. Feature matrix
+
+**FILE:** `src/features/build_features.py` — functions:
+`add_trade_features()`, `add_toxicity_label()`, `add_vpin_feature()`,
+`build_full_features()`
+
+**Flow:**
+1. Load week's trades + per-day book features.
+2. Merge trades + book state (positional, row-count guarded).
+3. `add_trade_features` — trailing windows.
+4. `add_toxicity_label` — forward-only horizon.
+5. `add_vpin_feature` — join VPIN.
+6. Save `full_features.parquet`.
+
+**Talking points:**
+- Trailing windows use `searchsorted` + prefix sums instead of a per-row
+  scan — O(log n) per lookup vs O(window size) per row, matters at tens
+  of millions of rows.
+- Forward-only label: a row without a full future horizon gets *dropped*,
+  not clipped.
+- Merge is positional with a row-count guard — mismatched days get
+  skipped entirely rather than silently misaligned. Timestamp-keyed join
+  is the fix I'd still make.
+
+**Reserve:** `daily_vol / 7` in `add_vpin_feature` is hardcoded, doesn't
+account for weeks with missing days (ETH/SOL week 3) — still open.
+
+### 4c. Classifier
+
+**FILE:** `src/models/classifier/data_loader.py` — `load_asset_week()`,
+`subsample_stratified()`, `prepare_split()`. Also:
+`src/models/classifier/classifier.py` — `VPINBaseline`,
+`ToxicityClassifier.fit()`/`.evaluate()`
+
+**Flow:**
+1. `load_asset_week` — load features, add 3 more (spread_bps,
+   microprice_minus_mid, qty_normalised), drop VPIN-warmup/invalid rows.
+2. `prepare_split` — pool assets for train weeks, stratified subsample;
+   test weeks loaded full, no subsampling.
+3. `ToxicityClassifier.fit` — fit VPIN baseline (no-op), logreg (scaled),
+   GBT (unscaled).
+4. `.evaluate` — AP/AUC/Brier + precision at fixed thresholds.
+
+**Talking points:**
+- The 3 extra features live here, not upstream in `build_features.py` —
+  cross-asset normalization is a *modeling* decision, not a market fact,
+  so it stays at the point of consumption. Same caching-boundary
+  principle as the book-replay split, one layer downstream.
+- Three models behind one `predict_proba` call — **Strategy pattern**.
+  `VPINBaseline.fit()` does nothing at all, purely so it fits the same
+  loop as the sklearn models — an **Adapter**.
+- Only logreg gets scaled (fit train-only, never refit on test) — it
+  optimizes via gradient descent, scale distorts the optimizer and the L2
+  penalty. Trees split on raw thresholds — scaling is a no-op for them.
+- Chose this 3-model ladder over a neural net/random forest — ~15 tabular
+  features is exactly where boosting already matches deep learning with
+  less tuning. Real question was whether complexity earns its keep over
+  the raw signal, and survives a regime shift — same no-look-ahead
+  discipline applied to model evaluation: train only on weeks strictly
+  before the test week.
+- Training capped at 500k rows, stratified to true prevalence, not
+  rebalanced — full pooled set is tens of millions of rows, reruns need
+  to stay fast. Test sets never subsampled.
+
+**Reserve:** `spread_bps`/`qty_normalised` are properly normalized;
+`microprice_minus_mid` is **not** — raw dollar difference, still-open gap
+that undercuts the pooling argument for that one feature. Own it if asked.
+
+### 4d. Predictions export
+
+**FILE:** `src/evaluations/save_predictions.py`
+
+**Flow:**
+1. `prepare_split` on weeks 1+2 pooled (all 3 assets).
+2. Fit `ToxicityClassifier`, save logreg/scaler/GBT via `joblib`.
+3. Per asset: load week 3, predict with all 3 models, export parquet with
+   `asset, week, source_row, timestamp, y_true, p_logreg, p_gbt, p_vpin`.
+
+**Talking points:**
+- Exported per-asset, not pooled, deliberately — a paired statistical
+  test needs one observation per asset, not one blended number.
+- Identity preserved (`source_row`, `timestamp`) — this is what lets the
+  backtest safely reattach a prediction to its trade next.
+- **Memory management, explicit, not incidental:** `del split2;
+  gc.collect()` right after training, and `del df, X, y, p_logreg, p_gbt,
+  p_vpin; gc.collect()` at the end of every per-asset loop iteration.
+  Pooling weekly data across assets is multi-GB, and this loop loads
+  several such frames back-to-back. Honest framing, tested not assumed:
+  I checked whether this is cleaning up genuine reference cycles by
+  reproducing the same derive-columns/slice pattern and calling
+  `gc.collect()` explicitly — it found zero cyclic garbage; refcounting
+  alone had already freed everything. So the real justification isn't
+  "refcounting misses this" — it's forcing collection to run at a chosen
+  moment, defensively, rather than trusting the automatic allocation-count
+  trigger to fire before the next multi-GB load starts. I don't have
+  evidence this specific code needs it; it's disciplined practice, not a
+  proven leak.
+
+**Reserve:** the saved `.joblib` model artifacts aren't loaded back
+anywhere in the current repo — a live-scoring path is exactly what would
+consume them.
 
 ---
 
-## 5. Flagship #2 — `src/evaluations/bootstrap_eval.py` (~4–5 min)
+## 5. Flagship #2 — causal backtest (~4–5 min)
 
-**Say:**
+**FILE:** `src/evaluations/bootstrap_eval.py` — functions:
+`load_backtest_data()`, `build_bars()`, `run_backtest()`,
+`block_bootstrap_improvement()`, `compute_bootstrap_ci()`
 
-> This is the causal backtest. Adaptive spread is the market spread times
-> one plus a multiplier times the toxicity signal; skew is negative
-> inventory times a risk-aversion term times volatility times price — so
-> heavier inventory or higher predicted toxicity both widen the quotes or
-> shift them to protect against getting run over. A sell aggressor fills
-> the bid if its price reaches it, a buy fills the ask the same way,
-> mark-to-market is cash plus inventory times current mid.
->
-> This is vectorized for performance: sigma, fill size, gamma, and spreads
-> are precomputed as numpy arrays, and only cash and inventory — the
-> genuinely path-dependent part — run in a tight Python loop. That's about
-> half a second to a second per backtest on 600k bars, versus roughly
-> thirty seconds with `iterrows()` — it matters because the bootstrap runs
-> this hundreds of times per asset-week.
->
-> The invariant this whole module exists to protect: state and signal known
-> at the end of bar `t` can only place quotes for bar `t+1`, and only
-> trades in bar `t+1` or later can fill those quotes. A realized label is
-> never a valid decision signal, under any circumstance. That's enforced
-> three separate ways, not just asserted once and hoped for. First,
-> structurally in the code: the loop indexes state and signal at `i-1`
-> while checking fills against bar `i`, so the one-bar offset is built into
-> the indexing itself, not a convention someone has to remember to follow.
-> Second, at the interface: the function requires an explicit named
-> prediction column and hard-fails with a KeyError if it's missing, so
-> there's no code path where a realized label could get passed in as the
-> signal by accident. Third, by test: two synthetic tests guard this
-> directly — one builds bars where the realized label and the prediction
-> deliberately point in opposite directions and checks that only the
-> prediction ever drives the quote; one builds a bar where a fill-capable
-> trade arrives in the *same* bar the quote was set, and checks that the
-> fill gets rejected, since a fill is only valid on a strictly later bar
-> than the one that produced the quote.
->
-> This replaced an earlier version that didn't enforce any of that — it
-> computed a bar's quote from that same bar's realized, forward-looking
-> label, which is exactly the class of error those two tests are shaped to
-> catch if it ever creeps back in.
->
-> What's still open, honestly: the confidence intervals use a block
-> bootstrap over daily blocks, but resampled days get concatenated into one
-> continuous path with inventory carried straight across them — that
-> creates artificial transitions between days that were never actually
-> adjacent, including backward timestamp jumps at the block boundaries. And
-> the historical PnL table hasn't been rerun since the causal fix went in,
-> so it's reported as a historical, oracle-signal result — not evidence of
-> what the corrected strategy would actually do.
+> "That's the pipeline up to a prediction. Now the second deep dive — this
+> is where the sharpest engineering problem in the whole project lived."
 
-**Reserve — the full history behind the invariant, if asked "was there a bug
-here" or "how did you find it":**
+**Flow — read this first, this is the whole shape of the file:**
+1. `load_backtest_data` — merge features + predictions by `source_row`
+   identity, cross-check timestamps.
+2. `build_bars` — aggregate ticks into 1-second bars.
+3. `run_backtest` — **the core algorithm.** Simulate one strategy run:
+   quote, check fills, track cash/inventory, mark to market.
+4. `block_bootstrap_improvement` / `compute_bootstrap_ci` — resample daily
+   blocks, rerun step 3 many times, take percentiles for a CI.
+5. `build_regime_table` / `main` — package it all into the reported table.
 
-- The earlier version's `build_bars()` computed each bar's `toxic_rate`
-  directly from the realized, forward-looking label, and the backtest used
-  that *same bar's* value to set its own spread — the strategy's signal
-  was, literally, the future. The notebook's own text claimed the previous
-  bar was used; the code never actually shifted anything — a real
-  claim-vs-code mismatch, not just an oversight in the math.
-- Even a naive one-bar shift wouldn't have been enough to fix it: the
-  label's own horizon is ten seconds, longer than a single one-second bar,
-  so the *previous* bar's label still depends on prices up to nine seconds
-  after the current bar begins. That's why the fix had to be a real
-  redesign (named prediction column, `i-1`/`i` indexing, hard failure on a
-  missing signal) rather than a one-line shift.
-- One more concrete fix sitting right in the code as a comment: the
-  original notebook credited an ask fill at the bid price instead of the
-  ask price — a one-line accounting error that's invisible unless you're
-  checking cash flow against the actual economics of the trade, not just
-  running the code and watching it execute without error.
+**The algorithm, `run_backtest` specifically:**
+- Split the work by what's path-dependent and what isn't. Sigma, fill
+  size, gamma, spread — none of these depend on the running simulation
+  state, so they're **precomputed as numpy arrays, once, vectorized**.
+  Only cash and inventory are genuinely sequential (each bar's value
+  depends on every fill before it) — those run in a tight Python loop,
+  and nothing else does.
+- Real number, not a guess: **~0.5–1s per backtest on 600k bars, vs. ~30s
+  with `iterrows()`.** Matters because the bootstrap reruns this hundreds
+  of times per asset-week.
+
+**The invariant — say this plainly, don't over-explain it:**
+- State/signal from bar `t` can only place quotes for bar `t+1`; only
+  bar `t+1`+ trades can fill them. Enforced three ways: structurally
+  (`i-1`/`i` indexing), at the interface (hard KeyError without a named
+  prediction column), and by two synthetic tests (label vs. prediction
+  pointing opposite ways; same-bar fill rejected).
+- This replaced an earlier version that computed a bar's quote from that
+  *same bar's* realized label — exactly the class of error those two
+  tests now catch.
+
+**What's still open, honestly:**
+- Block bootstrap concatenates resampled days into one continuous
+  simulated path, inventory carried straight across — artificial
+  transitions between days that were never adjacent.
+- Historical PnL table predates the causal fix, not rerun — historical,
+  oracle-signal result only.
+
+**Reserve — the history, if asked "was there a bug" or "how'd you find it":**
+- Earlier `build_bars()` computed `toxic_rate` straight from the realized
+  label; backtest used that same bar's value as its own signal — the
+  strategy's signal was, literally, the future. Notebook text claimed
+  previous-bar; code never shifted anything.
+- Even a naive one-bar shift wouldn't fix it — label horizon is 10s,
+  longer than a 1s bar, so the previous bar's label still depends on
+  prices up to 9s after the current bar begins.
+- One more fix, in-code comment: original notebook credited an ask fill
+  at the bid price. One-line accounting error.
 
 **Reserve (Q&A only):**
-
 - `fill_size = alpha * market_spread / (sigma * mid)` is dimensionally
-  dollars over (dimensionless times dollars) — dimensionless — but it's
-  used as if it were a quantity of the base asset. Not dimensionally
-  anchored to a real risk budget.
-- `gamma` is defined via a formula referencing spread, fill size, sigma, and
-  mid, but algebraically those all cancel — it collapses to `1 / (2 * M *
-  alpha)`, a constant depending only on two fixed hyperparameters, despite
-  looking dynamic.
-- The inventory limit check happens *before* a fill is applied, so inventory
-  can overshoot the stated limit by up to one fill size.
-- `toxic_fill_rate()` detects fills via `inventory.diff()`; if both a buy
-  and sell fill land in the same bar and net to zero inventory change, that
-  bar's fills are invisible to it — undercounts.
-- The prediction/feature merge uses `validate="one_to_one"` on the
-  `source_row` join, plus an explicit timestamp cross-check that raises if
-  the merged prediction's timestamp doesn't match the feature row's own —
-  real defense against silent misalignment, not just a convention.
-- `kappa` in this code is trades-per-bar, not the Avellaneda-Stoikov
-  fill-intensity sensitivity to quote distance — this is A-S-inspired, not
-  a calibrated A-S solution.
+  dollars over (dimensionless × dollars) = dimensionless, used as if it
+  were base-asset units.
+- `gamma`'s formula algebraically collapses to `1 / (2*M*alpha)` — a
+  constant depending only on two fixed hyperparameters, despite looking
+  dynamic.
+- Inventory limit check happens *before* a fill — can overshoot by up to
+  one fill size.
+- `toxic_fill_rate()` uses `inventory.diff()` — same-bar two-sided fills
+  that net to zero are invisible to it.
+- Merge uses `validate="one_to_one"` plus the timestamp cross-check — real
+  defense against silent misalignment.
+- `kappa` here is trades-per-bar, not the A-S fill-intensity sensitivity —
+  A-S-inspired, not a calibrated A-S solution.
 
 ---
 
-## 6. Close (~60–90s)
+## 6. Test suite — proving the invariants (~2 min)
 
-**Say:**
+**FILE:** `tests/test_core.py`
 
-> The two things I'd still fix are a timestamp-keyed merge instead of the
-> positional one, and rerunning every PnL number and confidence interval now
-> that the signal path is causally correct — right now they're historical
-> and shouldn't be read as evidence of anything the classifier did. What I'd
-> add for production: event-time streaming instead of batch replay, real
-> queue position and transaction costs, and months of untouched
-> out-of-sample data instead of three selected weeks. The value here isn't a
-> profitable strategy claim — it's the discipline of finding out exactly
-> where a pipeline like this breaks, and being honest about what's still
-> unverified.
+> "Before I wrap up — every invariant I just claimed has a synthetic test
+> behind it, not just a description. Let me run a few, live."
+
+**Run these, in the same order as the talk — each one proves a specific
+claim already made, not a new one:**
+
+1. `pytest tests/test_core.py -k load_trades_timestamps_are_monotonic -v`
+   → the loader's sort invariant (Architecture section).
+2. `pytest tests/test_core.py -k apply_update_canonicalizes_price_key -v`
+   → the float-key fix (Flagship #1).
+3. `pytest tests/test_core.py -k reconstruct_samples_book_state_at_or_before_trade -v`
+   → the book replay's causal ordering (Flagship #1's core invariant).
+4. `pytest tests/test_core.py -k no_lookahead_leakage_rolling_features -v`
+   → trailing features never see a future trade (feature matrix, 4b).
+5. `pytest tests/test_core.py -k backtest_ignores_realised_target_column -v`
+   → a realized label can never drive the quote (Flagship #2, test 1 of 2).
+6. `pytest tests/test_core.py -k backtest_quotes_from_previous_bar_and_fills_on_current_bar -v`
+   → same-bar fills get rejected (Flagship #2, test 2 of 2).
+
+**Talking points:**
+- All 14 tests run in well under a second, synthetic, no external data
+  needed — safe to run live at any point in the talk, not just here.
+- These are boundary-constructed or hand-computed scenarios, not smoke
+  tests — e.g. the float-drift test literally constructs `0.1 + 0.2` to
+  get the exact representation-error case, not a fuzzed random input.
+- 8 more tests beyond these 6 cover PnL arithmetic in isolation, inclusive
+  trailing-window boundaries, label-horizon validity, and identity
+  preservation through the classifier loader — mention if asked "is that
+  all of them."
+
+**Reserve — if asked "what's NOT tested":** order-book timestamp ordering
+across days, data gaps inside an otherwise-valid label horizon,
+prediction-to-bar alignment beyond the merge's identity check, inventory
+limits and two-sided same-bar fills, a full deterministic end-to-end
+synthetic integration test. Real gaps, not covered here.
 
 ---
 
-## 7. Anticipated hiring-manager probes
+## 7. Close (~60–90s)
 
-Self-review flagged this script as bug-heavy (almost everything is framed as
-"found X, fixed X"), light on the classifier/ML work (one sentence for
-genuinely substantial modeling decisions), missing the scale/memory
-engineering material entirely, and missing any economic reality check in the
-close. Have real answers ready for these, not just the flagship material:
+**No file.**
 
-- "You've told me four things you found wrong. Tell me one thing in this
-  codebase you got right the first time and would build the same way
-  again — no audit needed."
-- "Walk me through the classifier's three-model comparison — I want to see
-  you defend the walk-forward split, not just name it."
-- "Your close doesn't mention detection performance. What fraction of toxic
-  trades does this actually catch, at a threshold where the false-alarm
-  rate is tolerable?"
-- "How did you produce the numbers in this project — anything AI-assisted?
-  Pick any line in `bootstrap_eval.py` and explain exactly why it's written
-  that way."
-- "You said the merge is positional with a row-count guard, and a
-  timestamp-keyed join is the fix you'd still make. Why didn't you just
-  make it now?"
-- "Your gamma formula collapses to a constant — so is inventory skew
-  actually doing anything dynamic in this strategy, or is it effectively a
-  fixed parameter dressed up as a control law?"
-- "What's your test coverage story overall — not the bugs you found, the
-  tests that would have caught them *before* interview prep, if any did?"
-- "You dropped `microprice_minus_mid`'s normalization bug into the reserve
-  material — if that's broken, what does it actually do to the pooled
-  model's behavior on SOL versus BTC? Have you checked?"
-- "If I gave you one more week before this interview, what would you
-  actually go fix, versus what would you leave as a documented
-  limitation — and why that split?"
+- To close out: two things I'd still fix — timestamp-keyed merge instead
+  of positional, and rerunning every PnL number/CI now the signal path is
+  causally correct (currently historical, not evidence of anything).
+- What I'd add for production: event-time streaming instead of batch
+  replay, real queue position and transaction costs, months of untouched
+  data instead of three selected weeks.
+- The value isn't a profitable-strategy claim — it's the discipline of
+  finding exactly where a pipeline like this breaks, and being honest
+  about what's still unverified.
+
+---
+
+## 8. Anticipated hiring-manager probes
+
+Earlier self-review flagged this as bug-heavy and light on the
+classifier/ML work — both reworked since (Flagship #2 is invariant-first,
+classifier stop covers scaling/model-choice/caching-boundary). Still true:
+close doesn't mention detection performance; worth a real answer on where
+test coverage's blind spots actually are.
+
+- "You've told me things you found wrong. Tell me one thing you got right
+  the first time — no audit needed."
+- "Walk me through the classifier's three-model comparison — defend the
+  walk-forward split, not just name it."
+- "What fraction of toxic trades does this actually catch, at a tolerable
+  false-alarm rate?"
+- "How did you produce these numbers — anything AI-assisted? Pick a line
+  in `bootstrap_eval.py`, explain why it's written that way."
+- "Merge is positional with a row-count guard, timestamp-keyed join is the
+  fix you'd still make — why not now?"
+- "Gamma collapses to a constant — is inventory skew doing anything
+  dynamic, or is it a fixed parameter dressed up as a control law?"
+- "What's your test coverage story — not the bugs you found, the tests
+  that would've caught them before interview prep, if any did?"
+- "`microprice_minus_mid`'s normalization bug is in Reserve — what does it
+  actually do to pooled model behavior on SOL vs. BTC? Checked?"
+- "One more week before this interview — what would you actually fix vs.
+  leave documented, and why that split?"
+- "Data loading — what happens if `side` has an unexpected value, a typo
+  or different casing?"
+- "You benchmarked SortedDict and found it might be a wash for this exact
+  workload — why keep the change instead of reverting?"
+- "Neither of today's two bugs was caught by a test, because neither
+  `main()` nor the CatBoost branch is exercised by the suite — where are
+  the real blind spots?"
+- "CatBoost doesn't load in your current environment — how confident are
+  you the historical CatBoost numbers are still reproducible?"

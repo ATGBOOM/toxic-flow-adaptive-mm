@@ -175,7 +175,7 @@ def build_full_features(
     """
     print(f"\n=== {asset} {week_name} ===")
 
-    # step 1: run book reconstruction if not already done
+    # step 1: 
     trades_df = pd.read_parquet(trades_path)
     trades_df["ts_ms"] = trades_df["timestamp"].astype("int64") // 10**6
 
